@@ -69,10 +69,11 @@
 			<label><span>Outer height</span><input type="number" id="oh" step="any" min="0.1" value="48"><span class="u lu">in</span></label>
 			<label><span>LED density</span><input type="number" id="lpm" step="any" min="1" value="30"><span class="u">/m</span></label>
 			<label><span>Nominal ring spacing</span><input type="number" id="rs" step="any" min="0.01" value="1.5"><span class="u lu">in</span></label>
+			<label><span>Center line</span><input type="range" id="cl" min="0" max="100" step="1" value="0" style="width:110px"><span class="u" id="clv">0%</span></label>
 			<label><span>Ring shape</span>
 				<select id="shape">
-					<option value="scaled">scaled (ends in center LED)</option>
-					<option value="offset">constant offset (ends in center line)</option>
+					<option value="even">even spacing</option>
+					<option value="ellipse">ellipses</option>
 				</select>
 			</label>
 			<label><span>LED spacing on ring</span>
@@ -82,6 +83,8 @@
 					<option value="even">stretch evenly</option>
 				</select>
 			</label>
+			<div class="hint">Center line 0% ends in a single center LED (scaled rings); 100% gives the longest line, where the ring gap is the same on both axes. A longer line evens out the gaps between rings.
+				"Even spacing" rings avoid the bunching that plain ellipses show between the axes.</div>
 			<div class="hint" id="ringHint"></div>
 		</fieldset>
 		<fieldset>
@@ -105,6 +108,7 @@
 			<label><span>Grid lines</span><input type="checkbox" id="vGrid" checked></label>
 			<label><span>Strip path</span><input type="checkbox" id="vPath" checked></label>
 			<label><span>Snap error lines</span><input type="checkbox" id="vErr"></label>
+			<label><span>Color LEDs by ring gap</span><input type="checkbox" id="vGap"></label>
 			<label><span>Mapped cells</span><input type="checkbox" id="vCell" checked></label>
 		</fieldset>
 	</div>
@@ -123,6 +127,17 @@
 			<div class="hint">In WLED: set the LED count under LED Preferences to the total LED count, upload this as <code>/ledmap.json</code> via <code>/edit</code>, then reboot.
 				The ring test image has the exact matrix size and paints each ring in its own color (see per-ring details); show it with Pixel Forge / the Image effect to check that the map matches the fixture.</div>
 			<textarea id="out" readonly spellcheck="false"></textarea>
+		</fieldset>
+		<fieldset>
+			<legend>Layout template (PDF)</legend>
+			<label><span>Paper</span><select id="paper"><option value="legal">US Legal (8.5 × 14 in)</option><option value="letter">US Letter (8.5 × 11 in)</option><option value="a4">A4 (210 × 297 mm)</option></select></label>
+			<label><span>Strip width</span><input type="number" id="sw" step="any" min="0" value="10"><span class="u">mm</span></label>
+			<label><span>LED size</span><input type="number" id="ls" step="any" min="0" value="5"><span class="u">mm</span></label>
+			<label><span>Page overlap</span><input type="number" id="ov" step="any" min="0" value="12"><span class="u">mm</span></label>
+			<div class="row"><button id="dlpdf">Download layout template (PDF)</button></div>
+			<div class="hint" id="pdfHint">Print at 100% / "Actual size" (no "fit to page"), then check the scale bar on each page.
+				Page 1 is an overview showing where every sheet goes; the full-size sheets carry a 1 in / 20 mm grid centered on the fixture for alignment.
+				Trim each sheet along its dashed line on the right and bottom edges and lay it over the overlap of the neighboring sheets.</div>
 		</fieldset>
 		<details>
 			<summary>Per-ring details</summary>
@@ -147,27 +162,42 @@ const fromIn = (v) => unit === "mm" ? v * MM : v;
 const fmtLen = (inch, dp = 2) => `${inch.toFixed(dp)} in / ${(inch * MM).toFixed(1)} mm`;
 const num = (id) => parseFloat(gId(id).value);
 
-// Arc-length table of an ellipse with semi-axes a (x) and b (y), starting at parametric angle t0.
-// Point at parameter t: x = a*sin(t), y = -b*cos(t) (y down, t=0 at top, increasing t moves clockwise on screen).
-// Returns {len, at(s, sign)} where at() gives the point at arc length s walking in direction sign (+1 cw, -1 ccw).
-function ellipseArc(a, b, t0) {
+// Every ring blends the outer oval O(t) into a point Q(t) on the center line, a segment of half-length c on the long axis:
+//   P(t, w) = O(t) + (Q(t) - O(t)) * w, with w = 0 at the outer ring and w = 1 on the center line.
+// O(t) = (a*sin t, -b*cos t): y down, t = 0 at the top, increasing t moves clockwise on screen.
+// "ellipse": Q = long-axis coordinate scaled by c / B, so every ring is an ellipse (c = 0: scaled copies, c = B - A: equal axis offset).
+// "even":    Q = smooth clamp of the long-axis coordinate to [-c, c] (about the closest point on the center line); this keeps the
+//            gap between rings more even at the "shoulders" of the oval, where scaled-down ellipses bunch up.
+// Both shapes are identical for c = 0.
+const SMOOTH_CLAMP_EXP = 8; // higher = closer to the exact closest point, lower = rounder rings; 8 had no visible kinks in tests
+function ringFn(a, b, c, shape) {
+	const vertical = b >= a, B = vertical ? b : a;
+	const q = shape === "ellipse" ? (m) => m * c / B
+		: (m) => c > 0 ? m / Math.pow(1 + Math.pow(Math.abs(m) / c, SMOOTH_CLAMP_EXP), 1 / SMOOTH_CLAMP_EXP) : 0;
+	return (t, w) => {
+		const ox = a * Math.sin(t), oy = -b * Math.cos(t);
+		return vertical ? [ox * (1 - w), oy + (q(oy) - oy) * w] : [ox + (q(ox) - ox) * w, oy * (1 - w)];
+	};
+}
+
+// Arc-length table of the closed curve fn(t), starting at t0 and walking in direction sign (+1 clockwise, -1 counter-clockwise).
+// Returns {len, at(s)} where at() gives the point at arc length s from the start.
+function curveArc(fn, t0, sign) {
 	const N = 2048;
 	const cum = new Float64Array(N + 1);
-	let px = a * Math.sin(t0), py = -b * Math.cos(t0);
+	let [px, py] = fn(t0);
 	for (let i = 1; i <= N; i++) {
-		const t = t0 + 2 * Math.PI * i / N;
-		const x = a * Math.sin(t), y = -b * Math.cos(t);
+		const [x, y] = fn(t0 + sign * 2 * Math.PI * i / N);
 		cum[i] = cum[i - 1] + Math.hypot(x - px, y - py);
 		px = x; py = y;
 	}
 	const len = cum[N];
-	function at(s, sign) {
+	function at(s) {
 		s = ((s % len) + len) % len;
 		let lo = 0, hi = N;
 		while (hi - lo > 1) { const m = (lo + hi) >> 1; if (cum[m] <= s) lo = m; else hi = m; }
 		const f = (s - cum[lo]) / ((cum[hi] - cum[lo]) || 1);
-		const t = t0 + sign * 2 * Math.PI * (lo + f) / N;
-		return [a * Math.sin(t), -b * Math.cos(t)];
+		return fn(t0 + sign * 2 * Math.PI * (lo + f) / N);
 	}
 	return { len, at };
 }
@@ -175,73 +205,88 @@ function ellipseArc(a, b, t0) {
 // Parametric angle t on ellipse (a, b) whose point lies in polar direction theta (0 = up, clockwise).
 const polarToParam = (theta, a, b) => Math.atan2(Math.sin(theta) / a, Math.cos(theta) / b);
 
-// Resize ellipse (a, b) so its perimeter is exactly cnt strip pitches: the strip then closes with a normal
-// LED-to-LED gap instead of the 1..2 pitch gap left at the end of a fixed-pitch ring.
-// scaled shape keeps the aspect ratio (factor), offset shape grows/shrinks both semi-axes by the same amount.
-function fitRing(a, b, cnt, p) {
-	const target = cnt * p.pitch;
-	if (p.shape === "scaled") {
-		const f = target / ellipseArc(a, b, 0).len;
-		return [a * f, b * f];
+// Distance from point (x, y) to the polyline pts (closed when the first and last point differ only by the curve closing).
+function distToPolyline(x, y, pts) {
+	let m = Infinity;
+	for (let i = 0; i < pts.length - 1; i++) {
+		const [x1, y1] = pts[i], [x2, y2] = pts[i + 1];
+		const dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy;
+		const u = l2 ? Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / l2)) : 0;
+		m = Math.min(m, Math.hypot(x - x1 - u * dx, y - y1 - u * dy));
 	}
-	for (let i = 0; i < 6; i++) { // perimeter grows by ~2*PI per unit offset; a few Newton steps converge
-		const dd = (target - ellipseArc(a, b, 0).len) / (2 * Math.PI);
-		a = Math.max(1e-3, a + dd); b = Math.max(1e-3, b + dd);
-		if (Math.abs(dd) < 1e-6) break;
-	}
-	return [a, b];
+	return m;
 }
 
 // Build the physical LED layout (in inches, origin at the oval center) in wiring order.
 function buildLeds(p) {
-	let a0 = p.w / 2, b0 = p.h / 2;
-	if (p.spread === "fit") {
-		// outer ring may only shrink to stay within the fixture
-		const cnt = Math.max(1, Math.floor(ellipseArc(a0, b0, 0).len / p.pitch + 1e-9));
-		[a0, b0] = fitRing(a0, b0, cnt, p);
-	}
-	const minR = Math.min(a0, b0);
-	const n = Math.max(1, Math.ceil(minR / p.spacing - 1e-9)); // number of real rings
-	const step = minR / n;                                     // actual spacing (<= nominal) along the minor axis
 	const theta = p.start * Math.PI / 180;
 	const sign = p.dir === "cw" ? 1 : -1;
+	let a0 = p.w / 2, b0 = p.h / 2;
+	if (p.spread === "fit") {
+		// outer ring may only shrink to stay within the fixture: scale it to the largest whole number of LEDs
+		const outer = ringFn(a0, b0, 0, p.shape);
+		const len = curveArc((t) => outer(t, 0), 0, 1).len;
+		const f = Math.max(1, Math.floor(len / p.pitch + 1e-9)) * p.pitch / len;
+		a0 *= f; b0 *= f;
+	}
+	const minR = Math.min(a0, b0), maxR = Math.max(a0, b0);
+	const c = (maxR - minR) * p.line;                        // center line half-length
+	const n = Math.max(1, Math.ceil(minR / p.spacing - 1e-9)); // number of real rings
+	const step = minR / n;                                     // actual spacing (<= nominal) across the narrow axis
+	const fn = ringFn(a0, b0, c, p.shape);
+	const t0 = polarToParam(theta, a0, b0);                    // every ring starts on the same O(t0) -> Q(t0) ray
 	const rings = [];
 	for (let k = 0; k < n; k++) {
-		let a, b;
-		if (p.shape === "scaled") { const f = 1 - k / n; a = a0 * f; b = b0 * f; }
-		else { a = a0 - k * step; b = b0 - k * step; }
-		let arc = ellipseArc(a, b, polarToParam(theta, a, b));
-		let cnt = p.spread === "fixed" ? Math.floor(arc.len / p.pitch + 1e-9) : Math.round(arc.len / p.pitch);
-		cnt = Math.max(1, cnt);
-		if (p.spread === "fit" && k > 0) { // outer ring (k = 0) is already fitted
-			[a, b] = fitRing(a, b, cnt, p);
-			arc = ellipseArc(a, b, polarToParam(theta, a, b));
+		let w = k / n;
+		let arc = curveArc((t) => fn(t, w), t0, sign);
+		let cnt = Math.max(1, p.spread === "fixed" ? Math.floor(arc.len / p.pitch + 1e-9) : Math.round(arc.len / p.pitch));
+		if (p.spread === "fit" && k > 0) {
+			// move the ring in or out (perimeter shrinks as w grows) until it holds exactly cnt pitches
+			const target = cnt * p.pitch;
+			let lo = Math.max(0, w - 0.5 / n), hi = Math.min(1, w + 0.5 / n);
+			for (let i = 0; i < 30; i++) {
+				const mid = (lo + hi) / 2;
+				if (curveArc((t) => fn(t, mid), t0, sign).len > target) lo = mid; else hi = mid;
+			}
+			w = (lo + hi) / 2;
+			arc = curveArc((t) => fn(t, w), t0, sign);
 		}
 		const ds = p.spread === "even" ? arc.len / cnt : p.pitch;
 		const pts = [];
-		for (let i = 0; i < cnt; i++) pts.push(arc.at(i * ds, sign));
-		rings.push({ k, a, b, len: arc.len, cnt, ds, gap: arc.len - (cnt - 1) * ds, pts });
+		for (let i = 0; i < cnt; i++) pts.push(arc.at(i * ds));
+		const curve = [];
+		for (let i = 0; i <= 360; i++) curve.push(arc.at(arc.len * i / 360));
+		const ext = curve.reduce((e, [x, y]) => [Math.max(e[0], Math.abs(x)), Math.max(e[1], Math.abs(y))], [0, 0]);
+		rings.push({ k, w, ew: 2 * ext[0], eh: 2 * ext[1], len: arc.len, cnt, ds, gap: arc.len - (cnt - 1) * ds, pts, curve });
 	}
-	// center: a single LED (scaled, or offset with a round fixture) or a straight line along the major axis (offset)
-	const lineLen = 2 * Math.abs(b0 - a0);
+	// center: a single LED, or LEDs at strip pitch along the center line
+	const vertical = b0 >= a0;
 	const ctr = [];
-	if (p.shape === "scaled" || lineLen < p.pitch) ctr.push([0, 0]);
+	let ctrCurve;
+	if (2 * c < p.pitch) { ctr.push([0, 0]); ctrCurve = [[0, 0], [0, 0]]; }
 	else {
-		const cnt = Math.floor(lineLen / p.pitch + 1e-9) + 1;
+		const cnt = Math.floor(2 * c / p.pitch + 1e-9) + 1;
 		const half = (cnt - 1) * p.pitch / 2;
-		const vertical = b0 > a0;
 		// walk the line in the direction the strip is already heading at the start angle
 		const s0 = vertical ? (Math.cos(theta) >= 0 ? -1 : 1) : (Math.sin(theta) >= 0 ? 1 : -1);
 		for (let i = 0; i < cnt; i++) {
 			const v = s0 * (-half + i * p.pitch);
 			ctr.push(vertical ? [0, -v] : [v, 0]);
 		}
+		ctrCurve = vertical ? [[0, -c], [0, c]] : [[-c, 0], [c, 0]];
 	}
-	rings.push({ k: n, a: 0, b: 0, len: ctr.length > 1 ? lineLen : 0, cnt: ctr.length, ds: p.pitch, gap: 0, pts: ctr, center: true });
+	rings.push({ k: n, w: 1, ew: vertical ? 0 : 2 * c, eh: vertical ? 2 * c : 0, len: ctr.length > 1 ? 2 * c : 0, cnt: ctr.length, ds: p.pitch, gap: 0, pts: ctr, curve: ctrCurve, center: true });
+	// ring gap: distance from each LED to the next ring inwards (center line / LED for the innermost ring)
+	const gaps = [];
+	for (let k = 0; k < n; k++) rings[k].gaps = rings[k].pts.map(([x, y]) => { const g = distToPolyline(x, y, rings[k + 1].curve); gaps.push(g); return g; });
+	rings[n].gaps = rings[n].pts.map(() => null);
+	const mean = gaps.reduce((s, v) => s + v, 0) / gaps.length;
+	const sd = Math.sqrt(gaps.reduce((s, v) => s + (v - mean) ** 2, 0) / gaps.length);
+	const gapStats = { min: Math.min(...gaps), max: Math.max(...gaps), mean, cv: sd / mean };
 	if (p.order === "in") rings.reverse();
 	const leds = [];
-	rings.forEach((r, ri) => r.pts.forEach(([x, y]) => leds.push({ x, y, ring: r.k, ri })));
-	return { leds, rings, n, step, outerW: 2 * a0, outerH: 2 * b0 };
+	rings.forEach((r, ri) => r.pts.forEach(([x, y], i) => leds.push({ x, y, ring: r.k, ri, gap: r.gaps[i] })));
+	return { leds, rings, n, step, c, gapStats, outerW: 2 * a0, outerH: 2 * b0 };
 }
 
 // Snap LEDs to matrix cells. Each LED gets its nearest cell; on conflicts the LED closest to the
@@ -294,7 +339,7 @@ function params() {
 		w: toIn(num("ow")), h: toIn(num("oh")),
 		pitch: 1000 / num("lpm") / MM,
 		spacing: toIn(num("rs")),
-		shape: gId("shape").value, spread: gId("spread").value,
+		shape: gId("shape").value, spread: gId("spread").value, line: num("cl") / 100,
 		start: num("sa") || 0, dir: gId("dir").value, order: gId("order").value,
 		cell: toIn(num("cs")), name: gId("nm").value || "oval"
 	};
@@ -319,14 +364,17 @@ function stat(label, val, sub = "", cls = "") {
 }
 
 function render() {
-	const { p, leds, rings, n, step, g, outerW, outerH } = res;
-	const minR = Math.min(outerW, outerH) / 2, maxR = Math.max(outerW, outerH) / 2;
+	const { p, leds, rings, n, step, c, gapStats, g, outerW, outerH } = res;
+	const ctr = rings.find((r) => r.center);
+	gId("clv").textContent = `${Math.round(p.line * 100)}%`;
 	const outerTxt = p.spread === "fit" ? `Outer ring resized to ${fromIn(outerW).toFixed(2)} × ${fromIn(outerH).toFixed(2)} ${unit}. ` : "";
-	gId("ringHint").textContent = outerTxt + (p.shape === "scaled"
-		? `${n} rings + center LED. Actual spacing ${p.spread === "fit" ? "≈" : ""}${fromIn(step).toFixed(2)} ${unit} across the narrow axis, ${fromIn(step * maxR / minR).toFixed(2)} ${unit} along the long axis.`
-		: `${n} rings + center line. Actual spacing ${p.spread === "fit" ? "≈" : ""}${fromIn(step).toFixed(2)} ${unit} on both axes.`);
+	gId("ringHint").textContent = outerTxt + `${n} rings + ` + (ctr.cnt > 1
+		? `a ${fromIn(2 * c).toFixed(2)} ${unit} center line (${ctr.cnt} LEDs). `
+		: "center LED. ") + `Ring spacing ${p.spread === "fit" ? "≈" : ""}${fromIn(step).toFixed(2)} ${unit} across the narrow axis.`;
 	const stripLen = rings.reduce((s, r) => s + r.cnt, 0) * p.pitch;
 	let html = stat("Total LEDs", leds.length, `${rings.length} rings · ~${(stripLen * MM / 1000).toFixed(2)} m strip`);
+	html += stat("Ring gap", `${fromIn(gapStats.min).toFixed(2)} – ${fromIn(gapStats.max).toFixed(2)} ${unit}`,
+		`spread ${(100 * gapStats.cv).toFixed(0)}% (std/mean) · mean ${fromIn(gapStats.mean).toFixed(2)}`);
 	const msgs = [];
 	if (!g.ok) {
 		html += stat("Matrix", `${g.cols} × ${g.rows}`, "too large or too small", "err");
@@ -359,7 +407,7 @@ function render() {
 	let t = `<tr><th>#</th><th>test color</th><th>ring</th><th>w × h (${unit})</th><th>perimeter</th><th>LEDs</th><th>first idx</th><th>end gap</th></tr>`;
 	let idx = 0;
 	rings.forEach((r, i) => {
-		t += `<tr><td>${i}</td><td><span style="display:inline-block;width:14px;height:10px;background:${ringColor(r)}"></span></td><td>${r.center ? "center" : r.k}</td><td>${fromIn(2 * r.a).toFixed(2)} × ${fromIn(2 * r.b).toFixed(2)}</td>`
+		t += `<tr><td>${i}</td><td><span style="display:inline-block;width:14px;height:10px;background:${ringColor(r)}"></span></td><td>${r.center ? "center" : r.k}</td><td>${fromIn(r.ew).toFixed(2)} × ${fromIn(r.eh).toFixed(2)}</td>`
 			+ `<td>${fromIn(r.len).toFixed(2)}</td><td>${r.cnt}</td><td>${idx}</td><td>${r.center ? "" : fromIn(r.gap).toFixed(2)}</td></tr>`;
 		idx += r.cnt;
 	});
@@ -423,7 +471,7 @@ function draw() {
 	}
 	// ring outlines
 	ctx.strokeStyle = "rgba(255,255,255,0.15)";
-	rings.forEach((r) => { if (r.a > 0) { ctx.beginPath(); ctx.ellipse(X(0), Y(0), r.a * s, r.b * s, 0, 0, 2 * Math.PI); ctx.stroke(); } });
+	rings.forEach((r) => { ctx.beginPath(); r.curve.forEach(([x, y], i) => i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))); ctx.stroke(); });
 	if (gId("vPath").checked) {
 		ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.lineWidth = 1;
 		ctx.beginPath();
@@ -437,8 +485,11 @@ function draw() {
 		ctx.stroke();
 	}
 	const nL = leds.length;
+	const byGap = gId("vGap").checked, gs = res.gapStats;
 	leds.forEach((l, i) => {
-		ctx.fillStyle = `hsl(${Math.round(300 * i / Math.max(1, nL - 1))},90%,60%)`;
+		// by gap: red = tightest, blue = widest gap to the next ring inwards; center LEDs white
+		if (byGap) ctx.fillStyle = l.gap == null ? "#fff" : `hsl(${Math.round(240 * (l.gap - gs.min) / ((gs.max - gs.min) || 1))},90%,55%)`;
+		else ctx.fillStyle = `hsl(${Math.round(300 * i / Math.max(1, nL - 1))},90%,60%)`;
 		ctx.beginPath(); ctx.arc(X(l.x), Y(l.y), dotR, 0, 2 * Math.PI); ctx.fill();
 	});
 	// mark first LED
@@ -463,6 +514,7 @@ cv.addEventListener("pointermove", (e) => {
 	const l = res.leds[bi];
 	tip.innerHTML = `LED ${bi} · ring ${res.rings[l.ri].center ? "center" : l.ring}<br>`
 		+ `pos ${fromIn(l.x).toFixed(2)}, ${fromIn(l.y).toFixed(2)} ${unit}`
+		+ (l.gap != null ? ` · gap ${fromIn(l.gap).toFixed(2)} ${unit}` : "")
 		+ (res.g.ok ? `<br>cell x=${l.cx}, y=${l.cy} · err ${fromIn(l.err).toFixed(2)} ${unit}` : "");
 	tip.style.display = "block";
 	const tx = e.clientX - r.left + 12, ty = e.clientY - r.top + 12;
@@ -488,9 +540,9 @@ gId("cp").onclick = () => {
 };
 gId("dlcsv").onclick = () => {
 	if (!res) return;
-	let csv = "index,ring,x_in,y_in,cell_x,cell_y,error_in\n";
+	let csv = "index,ring,x_in,y_in,cell_x,cell_y,error_in,ring_gap_in\n";
 	res.leds.forEach((l, i) => {
-		csv += `${i},${res.rings[l.ri].center ? "center" : l.ring},${l.x.toFixed(3)},${l.y.toFixed(3)},${l.cx ?? ""},${l.cy ?? ""},${l.err != null ? l.err.toFixed(3) : ""}\n`;
+		csv += `${i},${res.rings[l.ri].center ? "center" : l.ring},${l.x.toFixed(3)},${l.y.toFixed(3)},${l.cx ?? ""},${l.cy ?? ""},${l.err != null ? l.err.toFixed(3) : ""},${l.gap != null ? l.gap.toFixed(3) : ""}\n`;
 	});
 	download("led_positions.csv", csv, "text/csv");
 };
@@ -504,6 +556,271 @@ gId("dlimg").onclick = () => {
 		a.click();
 		setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 	}, "image/png");
+};
+
+// ---- layout template PDF ----
+const PT = 72;                // PDF points per inch
+const PAPER = { legal: [8.5, 14], letter: [8.5, 11], a4: [210 / MM, 297 / MM] }; // portrait width, height in inches
+const PAGE_MARGIN = 0.5;      // in, keeps marks clear of the printer's unprintable border
+const SHEET_BORDER = 0.25;    // in, extra area printed around the fixture outline
+const fmt = (v) => String(Math.round(v * 1e4) / 1e4);
+const pdfStr = (t) => "(" + String(t).replace(/[\\()]/g, (m) => "\\" + m).replace(/[^\x20-\x7e]/g, "?") + ")";
+
+// Minimal PDF 1.4 writer: one uncompressed content stream per page (ASCII only), built-in Helvetica.
+function pdfFile(streams, wIn, hIn) {
+	const objs = [];
+	objs[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+	objs[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+	const kids = [];
+	streams.forEach((st, i) => {
+		const po = 4 + 2 * i;
+		kids.push(`${po} 0 R`);
+		objs[po] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${fmt(wIn * PT)} ${fmt(hIn * PT)}] /Resources << /Font << /F1 3 0 R >> >> /Contents ${po + 1} 0 R >>`;
+		objs[po + 1] = `<< /Length ${st.length} >>\nstream\n${st}\nendstream`;
+	});
+	objs[2] = `<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${streams.length} >>`;
+	let out = "%PDF-1.4\n";
+	const offs = [];
+	for (let i = 1; i < objs.length; i++) { offs[i] = out.length; out += `${i} 0 obj\n${objs[i]}\nendobj\n`; }
+	const xref = out.length;
+	out += `xref\n0 ${objs.length}\n0000000000 65535 f \n` + offs.slice(1).map((o) => String(o).padStart(10, "0") + " 00000 n \n").join("");
+	return out + `trailer\n<< /Size ${objs.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+}
+
+// Collects drawing operators for one page. User space is inches with the origin at the top-left and y down.
+function pdfCanvas(hIn) {
+	const o = [`${PT} 0 0 ${-PT} 0 ${fmt(hIn * PT)} cm 1 J 1 j`];
+	const path = (pts) => pts.map(([x, y], i) => `${fmt(x)} ${fmt(y)} ${i ? "l" : "m"}`).join(" ");
+	return {
+		o,
+		save: () => o.push("q"),
+		restore: () => o.push("Q"),
+		translate: (x, y) => o.push(`1 0 0 1 ${fmt(x)} ${fmt(y)} cm`),
+		scale: (s) => o.push(`${fmt(s)} 0 0 ${fmt(s)} 0 0 cm`),
+		pen: (gray, wIn, dash) => o.push(`${fmt(gray)} G ${fmt(wIn)} w [${dash ? dash.map(fmt).join(" ") : ""}] 0 d`),
+		poly: (pts, close) => { if (pts.length > 1) o.push(path(pts) + (close ? " h S" : " S")); },
+		polyFill: (pts, gray) => o.push(`${fmt(gray)} g ${path(pts)} h f`),
+		line: (x1, y1, x2, y2) => o.push(`${fmt(x1)} ${fmt(y1)} m ${fmt(x2)} ${fmt(y2)} l S`),
+		rect: (x, y, w, h) => o.push(`${fmt(x)} ${fmt(y)} ${fmt(w)} ${fmt(h)} re S`),
+		clip: (x, y, w, h) => o.push(`${fmt(x)} ${fmt(y)} ${fmt(w)} ${fmt(h)} re W n`),
+		dot: (x, y, r, gray) => {
+			const k = 0.5523 * r, P = (a, b) => `${fmt(a)} ${fmt(b)}`;
+			o.push(`${fmt(gray)} g ${P(x + r, y)} m ${P(x + r, y + k)} ${P(x + k, y + r)} ${P(x, y + r)} c ${P(x - k, y + r)} ${P(x - r, y + k)} ${P(x - r, y)} c `
+				+ `${P(x - r, y - k)} ${P(x - k, y - r)} ${P(x, y - r)} c ${P(x + k, y - r)} ${P(x + r, y - k)} ${P(x + r, y)} c f`);
+		},
+		// text with its baseline at (x, y); align 0 = left, 0.5 = center, 1 = right (width estimated at 0.55 em per character)
+		text: (x, y, sizePt, t, align = 0, gray = 0) => {
+			const s = sizePt / PT, w = String(t).length * s * 0.55 * align;
+			o.push(`${fmt(gray)} g BT /F1 ${fmt(s)} Tf 1 0 0 -1 ${fmt(x - w)} ${fmt(y)} Tm ${pdfStr(t)} Tj ET`);
+		},
+		toString: () => o.join("\n")
+	};
+}
+
+// Split a polyline into the runs that come near the box [x0, y0, x1, y1], so each sheet only carries what it shows.
+function polyRuns(pts, box) {
+	const inside = ([x, y]) => x >= box[0] && x <= box[2] && y >= box[1] && y <= box[3];
+	const runs = [];
+	let run = null;
+	pts.forEach((pt, i) => {
+		const near = inside(pt) || (i > 0 && inside(pts[i - 1])) || (i < pts.length - 1 && inside(pts[i + 1]));
+		if (near) { if (!run) runs.push(run = []); run.push(pt); } else run = null;
+	});
+	return runs;
+}
+
+// Offset a polyline sideways by dist (positive = to the left of the walking direction on screen).
+function offsetPoly(pts, dist) {
+	return pts.map((pt, i) => {
+		const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+		const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1;
+		return [pt[0] + dy / l * dist, pt[1] - dx / l * dist];
+	});
+}
+
+// Unit tangent (walking direction) and outward normal of each LED on a ring.
+function ledFrames(r) {
+	const n = r.pts.length;
+	return r.pts.map((pt, i) => {
+		let tx, ty;
+		if (n < 2) { tx = 1; ty = 0; }
+		else if (r.center) { const a = r.pts[0], b = r.pts[n - 1]; tx = b[0] - a[0]; ty = b[1] - a[1]; }
+		else { const a = r.pts[(i + n - 1) % n], b = r.pts[(i + 1) % n]; tx = b[0] - a[0]; ty = b[1] - a[1]; }
+		const l = Math.hypot(tx, ty) || 1;
+		tx /= l; ty /= l;
+		let nx = ty, ny = -tx;
+		if (!r.center && nx * pt[0] + ny * pt[1] < 0) { nx = -nx; ny = -ny; }
+		return { tx, ty, nx, ny };
+	});
+}
+
+// Choose page orientation (fewer sheets wins) and the tile grid covering the fixture.
+function sheetGrid(p, paper, overlap) {
+	const W = p.w + 2 * SHEET_BORDER, H = p.h + 2 * SHEET_BORDER;
+	const grid = (pw, ph) => {
+		const bw = pw - 2 * PAGE_MARGIN, bh = ph - 2 * PAGE_MARGIN, sx = bw - overlap, sy = bh - overlap;
+		const cols = Math.max(1, Math.ceil((W - overlap) / sx - 1e-9)), rows = Math.max(1, Math.ceil((H - overlap) / sy - 1e-9));
+		return { pw, ph, bw, bh, sx, sy, cols, rows, x0: -(cols * sx + overlap) / 2, y0: -(rows * sy + overlap) / 2 };
+	};
+	const [w, h] = PAPER[paper];
+	const a = grid(w, h), b = grid(h, w);
+	return b.cols * b.rows < a.cols * a.rows ? b : a;
+}
+
+function layoutPdf() {
+	const { p, rings, leds, outerW, outerH } = res;
+	const paper = gId("paper").value;
+	const sw = Math.max(0, num("sw") || 0) / MM, ls = Math.max(0, num("ls") || 0) / MM, overlap = Math.max(0, num("ov") || 0) / MM;
+	const G = sheetGrid(p, paper, overlap);
+	if (G.sx <= 0 || G.sy <= 0) return null;
+	const nSheets = G.cols * G.rows + 1;
+	const gridStep = unit === "mm" ? 20 / MM : 1;
+	const fixture = [];
+	for (let i = 0; i <= 360; i++) { const t = 2 * Math.PI * i / 360; fixture.push([p.w / 2 * Math.sin(t), -p.h / 2 * Math.cos(t)]); }
+	const frames = rings.map(ledFrames);
+	const firstIdx = [];
+	rings.reduce((i, r, ri) => { firstIdx[ri] = i; return i + r.cnt; }, 0);
+	const ringName = (r) => r.center ? "center" : `R${r.k + 1}`;
+	const title = `${p.name}: ${fromIn(p.w).toFixed(unit === "mm" ? 0 : 2)} x ${fromIn(p.h).toFixed(unit === "mm" ? 0 : 2)} ${unit} oval, ${leds.length} LEDs`;
+	const streams = [];
+
+	// scale check bars in the bottom margin
+	const scaleBars = (c, ph) => {
+		const y = ph - PAGE_MARGIN / 2;
+		c.pen(0, 0.01);
+		[[PAGE_MARGIN, 2, "2 in"], [PAGE_MARGIN + 3.4, 50 / MM, "50 mm"]].forEach(([x, len, lab]) => {
+			c.line(x, y, x + len, y); c.line(x, y - 0.06, x, y + 0.06); c.line(x + len, y - 0.06, x + len, y + 0.06);
+			c.text(x + len + 0.08, y + 0.03, 7, `${lab} - check scale`);
+		});
+	};
+
+	// sheet 1: overview with the sheet grid
+	{
+		const c = pdfCanvas(G.ph);
+		c.text(PAGE_MARGIN, PAGE_MARGIN - 0.18, 11, `Sheet 1 of ${nSheets}: overview - ${title}`);
+		const textH = 1.9;
+		const tw = G.cols * G.sx + overlap, th = G.rows * G.sy + overlap;
+		const s = Math.min(G.bw / tw, (G.bh - textH) / th);
+		c.save();
+		c.translate(PAGE_MARGIN + (G.bw - tw * s) / 2 - G.x0 * s, PAGE_MARGIN - G.y0 * s);
+		c.scale(s);
+		c.pen(0.6, 0.01 / s);
+		for (let j = 0; j < G.rows; j++) for (let i = 0; i < G.cols; i++) c.rect(G.x0 + i * G.sx, G.y0 + j * G.sy, G.sx, G.sy);
+		c.pen(0, 0.012 / s, [0.05 / s, 0.04 / s]);
+		c.poly(fixture);
+		c.pen(0.45, 0.008 / s);
+		rings.forEach((r) => c.poly(r.curve));
+		leds.forEach((l) => c.dot(l.x, l.y, 0.025 / s, 0));
+		c.dot(leds[0].x, leds[0].y, 0.07 / s, 0);
+		for (let j = 0; j < G.rows; j++) for (let i = 0; i < G.cols; i++)
+			c.text(G.x0 + (i + 0.5) * G.sx, G.y0 + (j + 0.5) * G.sy, 14 / s, String(2 + j * G.cols + i), 0.5, 0.35);
+		c.restore();
+		let y = G.ph - PAGE_MARGIN - textH + 0.25;
+		const lines = [
+			`Print at 100% / "Actual size" (not "fit to page"); confirm the scale bars measure correctly.`,
+			`Sheets are numbered left to right, top to bottom. Trim along the dashed line on the right and bottom edge of each sheet,`,
+			`then lay it over the next sheet so the trimmed edge sits on that sheet's dotted line and the grid lines match.`,
+			`Grid: ${unit === "mm" ? "20 mm" : "1 in"}, centered on the fixture. Big dot = LED 0. Strip ${fmt(sw * MM)} mm wide, LED squares ${fmt(ls * MM)} mm.`,
+			`Rings (outer to center): ` + rings.slice().sort((u, v) => u.k - v.k).map((r) => `${ringName(r)} ${r.cnt}`).join(", "),
+			`Outer ring ${fromIn(outerW).toFixed(2)} x ${fromIn(outerH).toFixed(2)} ${unit}, ${p.dir === "cw" ? "clockwise" : "counter-clockwise"} from ${fmt(p.start)} deg, ${p.order === "out" ? "outer ring first" : "center first"}.`
+		];
+		lines.forEach((t) => { c.text(PAGE_MARGIN, y, 8, t); y += 0.2; });
+		scaleBars(c, G.ph);
+		streams.push(c.toString());
+	}
+
+	// full-size sheets
+	for (let j = 0; j < G.rows; j++) for (let i = 0; i < G.cols; i++) {
+		const sheet = 2 + j * G.cols + i;
+		const tx = G.x0 + i * G.sx, ty = G.y0 + j * G.sy;
+		const pad = 0.3;
+		const box = [tx - pad, ty - pad, tx + G.bw + pad, ty + G.bh + pad];
+		const inBox = ([x, y]) => x >= box[0] && x <= box[2] && y >= box[1] && y <= box[3];
+		const c = pdfCanvas(G.ph);
+		const nb = [];
+		if (i > 0) nb.push(`left ${sheet - 1}`);
+		if (i < G.cols - 1) nb.push(`right ${sheet + 1}`);
+		if (j > 0) nb.push(`above ${sheet - G.cols}`);
+		if (j < G.rows - 1) nb.push(`below ${sheet + G.cols}`);
+		c.text(PAGE_MARGIN, PAGE_MARGIN - 0.18, 10, `Sheet ${sheet} of ${nSheets} (row ${j + 1}, column ${i + 1}) - ${nb.join(", ")} - ${title}`);
+		scaleBars(c, G.ph);
+		c.save();
+		c.translate(PAGE_MARGIN - tx, PAGE_MARGIN - ty);
+		c.clip(tx, ty, G.bw, G.bh);
+		// alignment grid and center axes
+		c.pen(0.8, 0.005);
+		for (let x = Math.ceil(box[0] / gridStep) * gridStep; x <= box[2]; x += gridStep) c.line(x, box[1], x, box[3]);
+		for (let y = Math.ceil(box[1] / gridStep) * gridStep; y <= box[3]; y += gridStep) c.line(box[0], y, box[2], y);
+		c.pen(0.45, 0.01);
+		c.line(0, box[1], 0, box[3]);
+		c.line(box[0], 0, box[2], 0);
+		// grid coordinates along the top and left edge of the sheet
+		const gl = (v) => unit === "mm" ? `${Math.round(v * MM)}` : `${Math.round(v)}`;
+		for (let x = Math.ceil(tx / gridStep) * gridStep; x <= tx + G.bw; x += gridStep) c.text(x + 0.03, ty + 0.12, 5, gl(x), 0, 0.5);
+		for (let y = Math.ceil((ty + 0.2) / gridStep) * gridStep; y <= ty + G.bh; y += gridStep) c.text(tx + 0.03, y - 0.03, 5, gl(y), 0, 0.5);
+		// fixture outline
+		c.pen(0, 0.012, [0.12, 0.08]);
+		polyRuns(fixture, box).forEach((run) => c.poly(run));
+		// strip edges and center lines
+		rings.forEach((r) => {
+			if (r.center && r.cnt < 2) return;
+			c.pen(0.6, 0.006);
+			polyRuns(r.curve, box).forEach((run) => c.poly(run));
+			if (sw > 0) {
+				c.pen(0, 0.01);
+				if (r.center) {
+					const [a, b] = [r.curve[0], r.curve[r.curve.length - 1]], e = p.pitch / 2;
+					const ux = (b[0] - a[0]) / (Math.hypot(b[0] - a[0], b[1] - a[1]) || 1), uy = (b[1] - a[1]) / (Math.hypot(b[0] - a[0], b[1] - a[1]) || 1);
+					const A = [a[0] - ux * e, a[1] - uy * e], B = [b[0] + ux * e, b[1] + uy * e];
+					c.poly(offsetPoly([A, B], sw / 2).concat(offsetPoly([A, B], -sw / 2).reverse()), true);
+				} else {
+					[sw / 2, -sw / 2].forEach((dd) => polyRuns(offsetPoly(r.curve, dd), box).forEach((run) => c.poly(run)));
+				}
+			}
+		});
+		// LEDs: square along the strip, cross at the center, index label on the outside of the strip
+		rings.forEach((r, ri) => r.pts.forEach((pt, li) => {
+			if (!inBox(pt)) return;
+			const f = frames[ri][li], h = ls / 2, idx = firstIdx[ri] + li;
+			const corner = (u, v) => [pt[0] + f.tx * u + f.nx * v, pt[1] + f.ty * u + f.ny * v];
+			c.pen(0, 0.01);
+			if (ls > 0) c.poly([corner(-h, -h), corner(h, -h), corner(h, h), corner(-h, h)], true);
+			c.pen(0, 0.006);
+			c.line(pt[0] - 0.05, pt[1], pt[0] + 0.05, pt[1]);
+			c.line(pt[0], pt[1] - 0.05, pt[0], pt[1] + 0.05);
+			const lo = Math.max(sw, ls) / 2 + 0.09;
+			c.text(pt[0] + f.nx * lo, pt[1] + f.ny * lo + 0.025, 5.5, String(idx), 0.5);
+			if (li === 0) {
+				// ring start: arrow along the wiring direction plus ring name and LED count
+				const L = 0.35, ax = pt[0] + f.nx * (lo + 0.15), ay = pt[1] + f.ny * (lo + 0.15);
+				c.pen(0, 0.014);
+				c.line(ax, ay, ax + f.tx * L, ay + f.ty * L);
+				c.line(ax + f.tx * L, ay + f.ty * L, ax + f.tx * (L - 0.08) + f.nx * 0.05, ay + f.ty * (L - 0.08) + f.ny * 0.05);
+				c.line(ax + f.tx * L, ay + f.ty * L, ax + f.tx * (L - 0.08) - f.nx * 0.05, ay + f.ty * (L - 0.08) - f.ny * 0.05);
+				c.text(ax + f.nx * 0.12, ay + f.ny * 0.12 + 0.03, 7, `${ringName(r)} start: LED ${idx} (${r.cnt} LEDs)`, 0.5);
+			}
+		}));
+		c.restore();
+		// trim lines (right / bottom) and alignment lines for the previous sheet (left / top)
+		const L = PAGE_MARGIN, T = PAGE_MARGIN;
+		c.pen(0, 0.01, [0.1, 0.06]);
+		if (i < G.cols - 1) { c.line(L + G.sx, T, L + G.sx, T + G.bh); c.text(L + G.sx - 0.05, T + 0.35, 6, "trim", 1); }
+		if (j < G.rows - 1) { c.line(L, T + G.sy, L + G.bw, T + G.sy); c.text(L + G.bw - 0.05, T + G.sy - 0.05, 6, "trim", 1); }
+		c.pen(0, 0.008, [0.02, 0.04]);
+		if (i > 0) { c.line(L + overlap, T, L + overlap, T + G.bh); c.text(L + overlap + 0.05, T + 0.5, 6, `align sheet ${sheet - 1} edge`); }
+		if (j > 0) { c.line(L, T + overlap, L + G.bw, T + overlap); c.text(L + G.bw / 2, T + overlap - 0.05, 6, `align sheet ${sheet - G.cols} edge`, 0.5); }
+		c.pen(0.3, 0.008);
+		c.rect(L, T, G.bw, G.bh);
+		streams.push(c.toString());
+	}
+	return { pdf: pdfFile(streams, G.pw, G.ph), sheets: nSheets, G, paper };
+}
+
+gId("dlpdf").onclick = () => {
+	if (!res) return;
+	const r = layoutPdf();
+	if (!r) { gId("msgs").innerHTML = '<div class="err">Page overlap is larger than the printable area.</div>'; return; }
+	download(`${res.p.name}-layout-${r.paper}.pdf`, r.pdf, "application/pdf");
 };
 
 // Largest cell size (stepping down 1% at a time from the LED pitch) at which no LED is displaced.
