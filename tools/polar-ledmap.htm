@@ -118,8 +118,10 @@
 				<button id="dl">Download ledmap.json</button>
 				<button id="cp">Copy</button>
 				<button id="dlcsv">Download LED positions (CSV)</button>
+				<button id="dlimg">Download ring test image (PNG)</button>
 			</div>
-			<div class="hint">In WLED: set the LED count under LED Preferences to the total LED count, upload this as <code>/ledmap.json</code> via <code>/edit</code>, then reboot.</div>
+			<div class="hint">In WLED: set the LED count under LED Preferences to the total LED count, upload this as <code>/ledmap.json</code> via <code>/edit</code>, then reboot.
+				The ring test image has the exact matrix size and paints each ring in its own color (see per-ring details); show it with Pixel Forge / the Image effect to check that the map matches the fixture.</div>
 			<textarea id="out" readonly spellcheck="false"></textarea>
 		</fieldset>
 		<details>
@@ -134,6 +136,8 @@ const gId = (id) => d.getElementById(id);
 const MM = 25.4;            // mm per inch
 const BYTES_PER_CELL = 10;  // segment buffer (4) + strip buffer (4) + mapping table (2), see WS2812FX::deserializeMap()
 const MAX_DIM = 255;        // ledmap width/height limit in deserializeMap()
+const RING_COLORS = ["#f00", "#0f0", "#00f", "#ff0", "#f0f", "#0ff", "#f80", "#80f"]; // ring test image, outer ring first
+const CENTER_COLOR = "#fff";
 
 let unit = "in";
 let res = null; // last computed layout
@@ -352,14 +356,33 @@ function render() {
 	for (let y = 0; y < g.rows; y++) lines.push(map.slice(y * g.cols, (y + 1) * g.cols).map((v) => String(v).padStart(w)).join(","));
 	gId("out").value = `{"n":${JSON.stringify(p.name)},"width":${g.cols},"height":${g.rows},"map":[\n${lines.join(",\n")}\n]}\n`;
 
-	let t = `<tr><th>#</th><th>ring</th><th>w × h (${unit})</th><th>perimeter</th><th>LEDs</th><th>first idx</th><th>end gap</th></tr>`;
+	let t = `<tr><th>#</th><th>test color</th><th>ring</th><th>w × h (${unit})</th><th>perimeter</th><th>LEDs</th><th>first idx</th><th>end gap</th></tr>`;
 	let idx = 0;
 	rings.forEach((r, i) => {
-		t += `<tr><td>${i}</td><td>${r.center ? "center" : r.k}</td><td>${fromIn(2 * r.a).toFixed(2)} × ${fromIn(2 * r.b).toFixed(2)}</td>`
+		t += `<tr><td>${i}</td><td><span style="display:inline-block;width:14px;height:10px;background:${ringColor(r)}"></span></td><td>${r.center ? "center" : r.k}</td><td>${fromIn(2 * r.a).toFixed(2)} × ${fromIn(2 * r.b).toFixed(2)}</td>`
 			+ `<td>${fromIn(r.len).toFixed(2)}</td><td>${r.cnt}</td><td>${idx}</td><td>${r.center ? "" : fromIn(r.gap).toFixed(2)}</td></tr>`;
 		idx += r.cnt;
 	});
 	gId("rings").innerHTML = t;
+}
+
+// Ring test color: by ring number counted from the outside, so colors do not depend on the wiring order.
+const ringColor = (r) => r.center ? CENTER_COLOR : RING_COLORS[r.k % RING_COLORS.length];
+
+// Matrix-sized PNG: every cell takes the color of the ring of the nearest mapped LED (empty cells included),
+// so a ring that is off by a cell still shows its own color and a mismatching LED count shows up as a color change.
+function ringTestImage() {
+	const { leds, rings, g } = res;
+	const c = d.createElement("canvas");
+	c.width = g.cols; c.height = g.rows;
+	const x = c.getContext("2d");
+	for (let cy = 0; cy < g.rows; cy++) for (let cx = 0; cx < g.cols; cx++) {
+		let bd = Infinity, bl = null;
+		for (const l of leds) { const dd = (l.cx - cx) ** 2 + (l.cy - cy) ** 2; if (dd < bd) { bd = dd; bl = l; } }
+		x.fillStyle = ringColor(rings[bl.ri]);
+		x.fillRect(cx, cy, 1, 1);
+	}
+	return c;
 }
 
 // ---- preview ----
@@ -470,6 +493,17 @@ gId("dlcsv").onclick = () => {
 		csv += `${i},${res.rings[l.ri].center ? "center" : l.ring},${l.x.toFixed(3)},${l.y.toFixed(3)},${l.cx ?? ""},${l.cy ?? ""},${l.err != null ? l.err.toFixed(3) : ""}\n`;
 	});
 	download("led_positions.csv", csv, "text/csv");
+};
+
+gId("dlimg").onclick = () => {
+	if (!res || !res.g.ok) return;
+	ringTestImage().toBlob((b) => {
+		const a = d.createElement("a");
+		a.href = URL.createObjectURL(b);
+		a.download = `ring-test-${res.g.cols}x${res.g.rows}.png`;
+		a.click();
+		setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+	}, "image/png");
 };
 
 // Largest cell size (stepping down 1% at a time from the LED pitch) at which no LED is displaced.
