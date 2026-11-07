@@ -53,7 +53,7 @@
 		#rings th { color: var(--dim); font-weight: normal; }
 		textarea { width: 100%; height: 160px; font-family: monospace; font-size: 11px; white-space: pre; }
 		details summary { cursor: pointer; color: var(--acc); }
-	body.L-warp .polar, body.L-polar .warp { display: none; }
+	body.L-warp .polar, body.L-polar .warp, body.M-cells .mx-square, body.M-square .mx-cells { display: none; }
 	</style>
 </head>
 <body>
@@ -121,10 +121,19 @@
 		</fieldset>
 		<fieldset>
 			<legend>Matrix</legend>
-			<label><span>Cell size</span><input type="number" id="cs" step="any" min="0.01" value="0.5"><span class="u lu">in</span></label>
+			<label><span>Matrix shape</span>
+				<select id="mx">
+					<option value="cells">square cells (true shape)</option>
+					<option value="square">square matrix (stretched cells)</option>
+				</select>
+			</label>
+			<label class="mx-cells"><span>Cell size</span><input type="number" id="cs" step="any" min="0.01" value="0.5"><span class="u lu">in</span></label>
+			<label class="mx-square"><span>Matrix size</span><input type="number" id="mn" step="1" min="1" max="255" value="37"><span class="u">× N</span></label>
 			<div class="row">
-				<button id="autofit" title="Largest cell size where every LED keeps its own nearest cell">Fit: coarsest without displacement</button>
+				<button id="autofit" title="Coarsest grid where every LED keeps its own nearest cell">Fit: coarsest without displacement</button>
 			</div>
+			<div class="hint mx-square">Square matrix: the LEDs' bounding box is split into N × N cells, so cells are stretched along the long axis.
+				Effects that draw round shapes (or size themselves to the shorter side) then fill the whole fixture, stretched with it.</div>
 			<label><span>Ledmap name (n)</span><input type="text" id="nm" value="oval" style="width:120px"></label>
 			<div class="hint">Smaller cells = more accurate placement, but more RAM and render time. Max 255×255.</div>
 		</fieldset>
@@ -428,16 +437,28 @@ function buildLeds(p) {
 
 // Snap LEDs to matrix cells. Each LED gets its nearest cell; on conflicts the LED closest to the
 // cell center wins and the others take the nearest free cell (by distance to their true position).
+// Cells are cw x ch: square (cell size) and centered on the fixture, or with "square matrix" the LEDs' bounding box split into
+// N x N cells, the outermost LEDs on the centers of the edge cells.
 function snap(leds, p) {
-	const c = p.cell;
-	const cols = Math.ceil(p.w / c - 1e-9), rows = Math.ceil(p.h / c - 1e-9);
-	const x0 = -cols * c / 2, y0 = -rows * c / 2;
-	const out = { cols, rows, x0, y0, c, displaced: 0, maxErr: 0, sumErr: 0, ok: true };
+	let cols, rows, cw, ch, x0, y0;
+	if (p.square) {
+		const xs = leds.map((l) => l.x), ys = leds.map((l) => l.y);
+		const minX = Math.min(...xs), minY = Math.min(...ys);
+		cols = rows = p.n;
+		cw = (Math.max(...xs) - minX) / Math.max(1, p.n - 1) || p.pitch;
+		ch = (Math.max(...ys) - minY) / Math.max(1, p.n - 1) || p.pitch;
+		x0 = minX - cw / 2; y0 = minY - ch / 2;
+	} else {
+		cw = ch = p.cell;
+		cols = Math.ceil(p.w / cw - 1e-9); rows = Math.ceil(p.h / ch - 1e-9);
+		x0 = -cols * cw / 2; y0 = -rows * ch / 2;
+	}
+	const out = { cols, rows, x0, y0, cw, ch, displaced: 0, maxErr: 0, sumErr: 0, ok: true };
 	if (cols > MAX_DIM || rows > MAX_DIM || cols * rows > 4e6) { out.ok = false; return out; }
 	const occ = new Int32Array(cols * rows).fill(-1);
 	const clampI = (v, m) => Math.min(m - 1, Math.max(0, v));
-	const cellOf = (l) => [clampI(Math.floor((l.x - x0) / c), cols), clampI(Math.floor((l.y - y0) / c), rows)];
-	const dist = (l, cx, cy) => Math.hypot(l.x - (x0 + (cx + .5) * c), l.y - (y0 + (cy + .5) * c));
+	const cellOf = (l) => [clampI(Math.floor((l.x - x0) / cw), cols), clampI(Math.floor((l.y - y0) / ch), rows)];
+	const dist = (l, cx, cy) => Math.hypot(l.x - (x0 + (cx + .5) * cw), l.y - (y0 + (cy + .5) * ch));
 	const order = leds.map((l, i) => { const [cx, cy] = cellOf(l); return { i, cx, cy, dd: dist(l, cx, cy) }; });
 	order.sort((u, v) => u.dd - v.dd);
 	for (const o of order) {
@@ -471,7 +492,7 @@ function snap(leds, p) {
 	let mx0 = cols, my0 = rows, mx1 = -1, my1 = -1;
 	for (const l of leds) { mx0 = Math.min(mx0, l.cx); mx1 = Math.max(mx1, l.cx); my0 = Math.min(my0, l.cy); my1 = Math.max(my1, l.cy); }
 	out.cols = mx1 - mx0 + 1; out.rows = my1 - my0 + 1;
-	out.x0 = x0 + mx0 * c; out.y0 = y0 + my0 * c;
+	out.x0 = x0 + mx0 * cw; out.y0 = y0 + my0 * ch;
 	out.occ = new Int32Array(out.cols * out.rows).fill(-1);
 	leds.forEach((l, i) => { l.cx -= mx0; l.cy -= my0; out.occ[l.cy * out.cols + l.cx] = i; });
 	return out;
@@ -488,17 +509,18 @@ function params() {
 		spacing: toIn(num("rs")),
 		shape: gId("shape").value, spread: gId("spread").value, line: num("cl") / 100,
 		start: num("sa") || 0, dir: gId("dir").value, order: gId("order").value,
+		square: gId("mx").value === "square", n: Math.round(num("mn")),
 		cell: toIn(num("cs")), name: gId("nm").value || "oval"
 	};
 }
 
 function valid(p) {
-	return [p.w, p.h, p.pitch, p.spacing, p.cell].every((v) => isFinite(v) && v > 0);
+	return [p.w, p.h, p.pitch, p.spacing, p.square ? p.n : p.cell].every((v) => isFinite(v) && v > 0);
 }
 
 function compute() {
 	const p = params();
-	d.body.className = "L-" + p.layout;
+	d.body.className = `L-${p.layout} M-${p.square ? "square" : "cells"}`;
 	if (!valid(p)) { gId("msgs").innerHTML = '<div class="err">Enter positive numbers for all dimensions.</div>'; return; }
 	const lay = layout(p);
 	const g = snap(lay.leds, p);
@@ -545,13 +567,13 @@ function render() {
 	const cells = g.cols * g.rows;
 	const ram = cells * BYTES_PER_CELL;
 	const ramCls = ram < 50e3 ? "ok" : ram < 100e3 ? "warn" : "err";
-	html += stat("Matrix", `${g.cols} × ${g.rows}`, `${cells} cells · ${(100 * leds.length / cells).toFixed(1)}% used`);
+	html += stat("Matrix", `${g.cols} × ${g.rows}`, `${cells} cells · ${(100 * leds.length / cells).toFixed(1)}% used · cell ${fromIn(g.cw).toFixed(2)} × ${fromIn(g.ch).toFixed(2)} ${unit}`);
 	html += stat("Est. RAM", `${(ram / 1024).toFixed(1)} KB`, "≈10 B/cell (rough)", ramCls);
 	html += stat("Max snap error", fmtLen(g.maxErr), `mean ${fromIn(g.sumErr / leds.length).toFixed(2)} ${unit}`);
 	html += stat("Displaced LEDs", g.displaced, "not in their nearest cell", g.displaced ? "warn" : "ok");
 	if (ram >= 50e3) msgs.push(`<div class="${ramCls}">Large matrix for a plain ESP32 without PSRAM. Check free heap on the Info page after loading the map, or use a bigger cell size.</div>`);
 	if (cells > 16384) msgs.push('<div class="err">More than 16384 cells (WLED MAX_LEDS default on ESP32).</div>');
-	if (g.displaced) msgs.push(`<div class="warn">${g.displaced} LEDs share a nearest cell with another LED and were moved to a neighboring cell. Use a smaller cell size or "Fit" to remove this.</div>`);
+	if (g.displaced) msgs.push(`<div class="warn">${g.displaced} LEDs share a nearest cell with another LED and were moved to a neighboring cell. ${p.square ? "Use a larger matrix size" : "Use a smaller cell size"} or "Fit" to remove this.</div>`);
 	gId("stats").innerHTML = html;
 	gId("msgs").innerHTML = msgs.join("");
 
@@ -647,20 +669,20 @@ function draw() {
 	const dotR = Math.max(1.5, Math.min(5, p.pitch * s * 0.3));
 
 	if (g.ok) {
-		const c = g.c;
+		const cw = g.cw, ch = g.ch;
 		if (gId("vCell").checked) {
 			ctx.fillStyle = "rgba(68,170,255,0.18)";
-			leds.forEach((l) => ctx.fillRect(X(g.x0 + l.cx * c), Y(g.y0 + l.cy * c), c * s, c * s));
+			leds.forEach((l) => ctx.fillRect(X(g.x0 + l.cx * cw), Y(g.y0 + l.cy * ch), cw * s, ch * s));
 		}
-		if (gId("vGrid").checked && c * s >= 3) {
+		if (gId("vGrid").checked && Math.min(cw, ch) * s >= 3) {
 			ctx.strokeStyle = "rgba(255,255,255,0.07)"; ctx.lineWidth = 1;
 			ctx.beginPath();
-			for (let i = 0; i <= g.cols; i++) { const x = Math.round(X(g.x0 + i * c)) + .5; ctx.moveTo(x, Y(g.y0)); ctx.lineTo(x, Y(g.y0 + g.rows * c)); }
-			for (let j = 0; j <= g.rows; j++) { const y = Math.round(Y(g.y0 + j * c)) + .5; ctx.moveTo(X(g.x0), y); ctx.lineTo(X(g.x0 + g.cols * c), y); }
+			for (let i = 0; i <= g.cols; i++) { const x = Math.round(X(g.x0 + i * cw)) + .5; ctx.moveTo(x, Y(g.y0)); ctx.lineTo(x, Y(g.y0 + g.rows * ch)); }
+			for (let j = 0; j <= g.rows; j++) { const y = Math.round(Y(g.y0 + j * ch)) + .5; ctx.moveTo(X(g.x0), y); ctx.lineTo(X(g.x0 + g.cols * cw), y); }
 			ctx.stroke();
 		}
 		ctx.strokeStyle = "rgba(255,255,255,0.25)";
-		ctx.strokeRect(X(g.x0), Y(g.y0), g.cols * c * s, g.rows * c * s);
+		ctx.strokeRect(X(g.x0), Y(g.y0), g.cols * cw * s, g.rows * ch * s);
 	}
 	// ring outlines
 	ctx.strokeStyle = "rgba(255,255,255,0.15)";
@@ -674,7 +696,7 @@ function draw() {
 	if (g.ok && gId("vErr").checked) {
 		ctx.strokeStyle = "rgba(255,180,60,0.8)";
 		ctx.beginPath();
-		leds.forEach((l) => { ctx.moveTo(X(l.x), Y(l.y)); ctx.lineTo(X(g.x0 + (l.cx + .5) * g.c), Y(g.y0 + (l.cy + .5) * g.c)); });
+		leds.forEach((l) => { ctx.moveTo(X(l.x), Y(l.y)); ctx.lineTo(X(g.x0 + (l.cx + .5) * g.cw), Y(g.y0 + (l.cy + .5) * g.ch)); });
 		ctx.stroke();
 	}
 	const nL = leds.length;
@@ -1023,6 +1045,15 @@ gId("autofit").onclick = () => {
 	const p = params();
 	if (!valid(p)) return;
 	const { leds } = layout(p);
+	if (p.square) {
+		// smallest N x N grid (at least one cell per LED) in which no LED is displaced
+		for (let n = Math.ceil(Math.sqrt(leds.length)); n <= MAX_DIM; n++) {
+			const g = snap(leds.map((l) => ({ x: l.x, y: l.y })), { ...p, n });
+			if (g.ok && g.displaced === 0) { gId("mn").value = n; compute(); return; }
+		}
+		gId("msgs").innerHTML = `<div class="err">No collision-free square grid up to ${MAX_DIM}×${MAX_DIM}.</div>`;
+		return;
+	}
 	let c = p.pitch, found = 0;
 	while (true) {
 		const g = snap(leds.map((l) => ({ x: l.x, y: l.y })), { ...p, cell: c });
