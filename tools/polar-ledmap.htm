@@ -150,7 +150,7 @@
 				<button id="dlimg">Download ring / strip test image (PNG)</button>
 			</div>
 			<div class="hint">In WLED: set the LED count under LED Preferences to the total LED count, upload this as <code>/ledmap.json</code> via <code>/edit</code>, then reboot.
-				The test image has the exact matrix size and paints every ring or strip in its own color (see the details table), with black away from the LEDs; a color change along a strip or ring means the map does not match the fixture.
+				The test image has 8×8 pixels per matrix cell (so it is 8× the matrix size) and paints every ring or strip in its own color (see the details table), with black away from the LEDs; a color change along a strip or ring means the map does not match the fixture.
 				The matrix only spans the mapped cells (no empty border rows or columns). In Pixel Forge, use "match size" and place the crop exactly on the image before uploading.</div>
 			<textarea id="out" readonly spellcheck="false"></textarea>
 		</fieldset>
@@ -177,6 +177,7 @@ const gId = (id) => d.getElementById(id);
 const MM = 25.4;            // mm per inch
 const BYTES_PER_CELL = 10;  // segment buffer (4) + strip buffer (4) + mapping table (2), see WS2812FX::deserializeMap()
 const MAX_DIM = 255;        // ledmap width/height limit in deserializeMap()
+const TEST_IMG_SCALE = 8;   // test PNG pixels per matrix cell (each way)
 const CENTER_RGB = [255, 255, 255];
 const GOLDEN_ANGLE = 137.508; // hue step between consecutive rings / strips: every one differs and neighbors contrast
 
@@ -607,11 +608,17 @@ function ringTestImage() {
 	return { w: g.cols, h: g.rows, px, pal };
 }
 
+// PNG with TEST_IMG_SCALE x TEST_IMG_SCALE pixels per matrix cell (hard edges, no smoothing).
 function testImagePng(img) {
+	const k = TEST_IMG_SCALE, W = img.w * k;
 	const c = d.createElement("canvas");
-	c.width = img.w; c.height = img.h;
-	const x = c.getContext("2d"), id = x.createImageData(img.w, img.h);
-	img.px.forEach((v, i) => { id.data.set(img.pal[v], i * 4); id.data[i * 4 + 3] = 255; });
+	c.width = W; c.height = img.h * k;
+	const x = c.getContext("2d"), id = x.createImageData(c.width, c.height);
+	for (let y = 0; y < c.height; y++) for (let xx = 0; xx < W; xx++) {
+		const o = (y * W + xx) * 4;
+		id.data.set(img.pal[img.px[Math.floor(y / k) * img.w + Math.floor(xx / k)]], o);
+		id.data[o + 3] = 255;
+	}
 	x.putImageData(id, 0, 0);
 	return c;
 }
@@ -732,7 +739,7 @@ gId("dlcsv").onclick = () => {
 
 gId("dlimg").onclick = () => {
 	if (!res || !res.g.ok) return;
-	testImagePng(ringTestImage()).toBlob((b) => download(`test-${res.g.cols}x${res.g.rows}.png`, b, "image/png"), "image/png");
+	testImagePng(ringTestImage()).toBlob((b) => download(`test-${res.g.cols}x${res.g.rows}-x${TEST_IMG_SCALE}.png`, b, "image/png"), "image/png");
 };
 
 // ---- layout template PDF ----
