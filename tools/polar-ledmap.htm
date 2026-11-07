@@ -53,7 +53,8 @@
 		#rings th { color: var(--dim); font-weight: normal; }
 		textarea { width: 100%; height: 160px; font-family: monospace; font-size: 11px; white-space: pre; }
 		details summary { cursor: pointer; color: var(--acc); }
-	body.L-warp .polar, body.L-polar .warp, body.M-cells .mx-square, body.M-square .mx-cells { display: none; }
+	body.L-warp .polar, body.L-polar .warp, .mx-dense, body.M-cells .mx-square, body.M-square .mx-cells, body.M-dense .mx-cells, body.M-dense .mx-square { display: none; }
+	body.M-dense .mx-dense { display: block; }
 	</style>
 </head>
 <body>
@@ -125,6 +126,7 @@
 				<select id="mx">
 					<option value="cells">square cells (true shape)</option>
 					<option value="square">square matrix (stretched cells)</option>
+					<option value="dense">dense warped grid (warped matrix only)</option>
 				</select>
 			</label>
 			<label class="mx-cells"><span>Cell size</span><input type="number" id="cs" step="any" min="0.01" value="0.5"><span class="u lu">in</span></label>
@@ -134,6 +136,8 @@
 			</div>
 			<div class="hint mx-square">Square matrix: the LEDs' bounding box is split into N × N cells, so cells are stretched along the long axis.
 				Effects that draw round shapes (or size themselves to the shorter side) then fill the whole fixture, stretched with it.</div>
+			<div class="hint mx-dense">Dense warped grid: one column per strip and one row per LED step along the strips (rows aligned at each strip's middle LED),
+				so every matrix cell inside the oval is an LED and nothing is skipped. Effects are drawn on the warped grid: rows follow the strips' LED steps, not straight lines.</div>
 			<label><span>Ledmap name (n)</span><input type="text" id="nm" value="oval" style="width:120px"></label>
 			<div class="hint">Smaller cells = more accurate placement, but more RAM and render time. Max 255×255.</div>
 		</fieldset>
@@ -326,16 +330,16 @@ function buildWarped(p) {
 		W = lo; limited = true;
 	}
 	// rows in geometric order (negative stack side first); every strip has an LED at its middle, so the LEDs line up in columns
-	const rows = g.vs.map((v0) => {
+	const rows = g.vs.map((v0, gi) => {
 		const curve = g.curve(v0, W);
 		const arc = polyArc(curve);
 		const m = Math.floor(arc.len / 2 / p.pitch + 1e-9);
-		const pts = [];
-		for (let j = -m; j <= m; j++) pts.push(arc.at(arc.len / 2 + j * p.pitch));
+		const pts = [], js = [];
+		for (let j = -m; j <= m; j++) { pts.push(arc.at(arc.len / 2 + j * p.pitch)); js.push(j); }
 		const s0 = arc.len / 2 - (m + 0.5) * p.pitch, s1 = arc.len / 2 + (m + 0.5) * p.pitch;
 		const strip = Array.from({ length: 81 }, (_, i) => arc.at(s0 + (s1 - s0) * i / 80)); // strip body, half a pitch past the end LEDs
 		const xs = curve.map((q) => q[0]), ys = curve.map((q) => q[1]);
-		return { curve, strip, pts, open: true, len: arc.len, cnt: pts.length, ds: p.pitch, gap: arc.len - 2 * m * p.pitch,
+		return { gi, js, m, curve, strip, pts, open: true, len: arc.len, cnt: pts.length, ds: p.pitch, gap: arc.len - 2 * m * p.pitch,
 			ew: Math.max(...xs) - Math.min(...xs), eh: Math.max(...ys) - Math.min(...ys), bend: bendRadius(curve, false) };
 	});
 	// gap: distance from each LED to the nearest neighboring strip
@@ -353,11 +357,16 @@ function buildWarped(p) {
 	const firstNeg = g.vertical ? p.corner[1] === "l" : p.corner[0] === "t";
 	const runNeg = g.vertical ? p.corner[0] === "t" : p.corner[1] === "l";
 	const order = firstNeg ? rows : rows.slice().reverse();
+	// dense grid cell of each LED: strip index (geometric order) across, LED step from the strip's middle LED along the strips
+	const mMax = Math.max(...rows.map((r) => r.m));
 	const leds = [];
 	order.forEach((r, k) => {
 		r.k = k;
-		if (runNeg === (p.serp && k % 2 === 1)) { r.pts.reverse(); r.gaps.reverse(); r.strip.reverse(); }
-		r.pts.forEach(([x, y], i) => leds.push({ x, y, ring: k, ri: k, gap: r.gaps[i] }));
+		if (runNeg === (p.serp && k % 2 === 1)) { r.pts.reverse(); r.gaps.reverse(); r.strip.reverse(); r.js.reverse(); }
+		r.pts.forEach(([x, y], i) => {
+			const step = r.js[i] + mMax;
+			leds.push({ x, y, ring: k, ri: k, gap: r.gaps[i], dx: g.vertical ? r.gi : step, dy: g.vertical ? step : r.gi });
+		});
 	});
 	return { leds, rings: order, n: g.n, step: 2 * g.S / g.n, c: 0, gapStats: statsOf(gaps), outerW: p.w, outerH: p.h,
 		warp: W, limited, bend: Math.min(...order.map((r) => r.bend)) };
@@ -440,6 +449,14 @@ function buildLeds(p) {
 // Cells are cw x ch: square (cell size) and centered on the fixture, or with "square matrix" the LEDs' bounding box split into
 // N x N cells, the outermost LEDs on the centers of the edge cells.
 function snap(leds, p) {
+	if (p.dense) {
+		// dense warped grid: cells come from the layout (dx, dy), no geometric snapping
+		const out = { dense: true, cols: Math.max(...leds.map((l) => l.dx)) + 1, rows: Math.max(...leds.map((l) => l.dy)) + 1, displaced: 0, maxErr: 0, sumErr: 0, ok: true };
+		if (out.cols > MAX_DIM || out.rows > MAX_DIM) { out.ok = false; return out; }
+		out.occ = new Int32Array(out.cols * out.rows).fill(-1);
+		leds.forEach((l, i) => { l.cx = l.dx; l.cy = l.dy; l.err = 0; out.occ[l.cy * out.cols + l.cx] = i; });
+		return out;
+	}
 	let cols, rows, cw, ch, x0, y0;
 	if (p.square) {
 		const xs = leds.map((l) => l.x), ys = leds.map((l) => l.y);
@@ -510,17 +527,18 @@ function params() {
 		shape: gId("shape").value, spread: gId("spread").value, line: num("cl") / 100,
 		start: num("sa") || 0, dir: gId("dir").value, order: gId("order").value,
 		square: gId("mx").value === "square", n: Math.round(num("mn")),
+		dense: gId("mx").value === "dense" && gId("layout").value === "warp",
 		cell: toIn(num("cs")), name: gId("nm").value || "oval"
 	};
 }
 
 function valid(p) {
-	return [p.w, p.h, p.pitch, p.spacing, p.square ? p.n : p.cell].every((v) => isFinite(v) && v > 0);
+	return [p.w, p.h, p.pitch, p.spacing, p.dense ? 1 : p.square ? p.n : p.cell].every((v) => isFinite(v) && v > 0);
 }
 
 function compute() {
 	const p = params();
-	d.body.className = `L-${p.layout} M-${p.square ? "square" : "cells"}`;
+	d.body.className = `L-${p.layout} M-${p.dense ? "dense" : p.square ? "square" : "cells"}`;
 	if (!valid(p)) { gId("msgs").innerHTML = '<div class="err">Enter positive numbers for all dimensions.</div>'; return; }
 	const lay = layout(p);
 	const g = snap(lay.leds, p);
@@ -564,12 +582,14 @@ function render() {
 		gId("out").value = ""; gId("rings").innerHTML = "";
 		return;
 	}
+	if (gId("mx").value === "dense" && !p.dense) msgs.push('<div class="warn">The dense warped grid needs the warped matrix layout; using square cells instead.</div>');
 	const cells = g.cols * g.rows;
 	const ram = cells * BYTES_PER_CELL;
 	const ramCls = ram < 50e3 ? "ok" : ram < 100e3 ? "warn" : "err";
-	html += stat("Matrix", `${g.cols} × ${g.rows}`, `${cells} cells · ${(100 * leds.length / cells).toFixed(1)}% used · cell ${fromIn(g.cw).toFixed(2)} × ${fromIn(g.ch).toFixed(2)} ${unit}`);
+	html += stat("Matrix", `${g.cols} × ${g.rows}`, `${cells} cells · ${(100 * leds.length / cells).toFixed(1)}% used · `
+		+ (g.dense ? "1 column per strip, 1 row per LED step" : `cell ${fromIn(g.cw).toFixed(2)} × ${fromIn(g.ch).toFixed(2)} ${unit}`));
 	html += stat("Est. RAM", `${(ram / 1024).toFixed(1)} KB`, "≈10 B/cell (rough)", ramCls);
-	html += stat("Max snap error", fmtLen(g.maxErr), `mean ${fromIn(g.sumErr / leds.length).toFixed(2)} ${unit}`);
+	if (!g.dense) html += stat("Max snap error", fmtLen(g.maxErr), `mean ${fromIn(g.sumErr / leds.length).toFixed(2)} ${unit}`);
 	html += stat("Displaced LEDs", g.displaced, "not in their nearest cell", g.displaced ? "warn" : "ok");
 	if (ram >= 50e3) msgs.push(`<div class="${ramCls}">Large matrix for a plain ESP32 without PSRAM. Check free heap on the Info page after loading the map, or use a bigger cell size.</div>`);
 	if (cells > 16384) msgs.push('<div class="err">More than 16384 cells (WLED MAX_LEDS default on ESP32).</div>');
@@ -668,7 +688,7 @@ function draw() {
 	const X = (x) => view.ox + x * s, Y = (y) => view.oy + y * s;
 	const dotR = Math.max(1.5, Math.min(5, p.pitch * s * 0.3));
 
-	if (g.ok) {
+	if (g.ok && !g.dense) {
 		const cw = g.cw, ch = g.ch;
 		if (gId("vCell").checked) {
 			ctx.fillStyle = "rgba(68,170,255,0.18)";
@@ -693,7 +713,7 @@ function draw() {
 		leds.forEach((l, i) => i ? ctx.lineTo(X(l.x), Y(l.y)) : ctx.moveTo(X(l.x), Y(l.y)));
 		ctx.stroke();
 	}
-	if (g.ok && gId("vErr").checked) {
+	if (g.ok && !g.dense && gId("vErr").checked) {
 		ctx.strokeStyle = "rgba(255,180,60,0.8)";
 		ctx.beginPath();
 		leds.forEach((l) => { ctx.moveTo(X(l.x), Y(l.y)); ctx.lineTo(X(g.x0 + (l.cx + .5) * g.cw), Y(g.y0 + (l.cy + .5) * g.ch)); });
@@ -1044,6 +1064,7 @@ gId("dlpdf").onclick = () => {
 gId("autofit").onclick = () => {
 	const p = params();
 	if (!valid(p)) return;
+	if (p.dense) { gId("msgs").innerHTML = '<div class="ok">The dense warped grid has one cell per LED: nothing to fit.</div>'; return; }
 	const { leds } = layout(p);
 	if (p.square) {
 		// smallest N x N grid (at least one cell per LED) in which no LED is displaced
