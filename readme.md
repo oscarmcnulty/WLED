@@ -1,4 +1,4 @@
-> **Oval / polar ledmap generator:** [open the app](https://raw.githack.com/oscarmcnulty/WLED/main/tools/polar-ledmap.htm) ([source](tools/polar-ledmap.htm))
+> **Oval ledmap generator (warped matrix or polar rings):** [open the app](https://raw.githack.com/oscarmcnulty/WLED/main/tools/polar-ledmap.htm) ([source](tools/polar-ledmap.htm))
 
 <p align="center">
   <img src="/images/wled_logo_akemi.png">

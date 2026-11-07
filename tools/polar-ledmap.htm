@@ -53,12 +53,13 @@
 		#rings th { color: var(--dim); font-weight: normal; }
 		textarea { width: 100%; height: 160px; font-family: monospace; font-size: 11px; white-space: pre; }
 		details summary { cursor: pointer; color: var(--acc); }
+	body.L-warp .polar, body.L-polar .warp { display: none; }
 	</style>
 </head>
 <body>
 <header>
 	<h1>WLED Oval / Polar Ledmap Generator</h1>
-	<p>Places LEDs on concentric ovals, snaps each one to the nearest cell of an oversized 2D matrix, and writes a sparse <code>ledmap.json</code> (empty cells are -1).</p>
+	<p>Places LEDs on concentric ovals or on a warped matrix of strips, snaps each one to the nearest cell of an oversized 2D matrix, and writes a sparse <code>ledmap.json</code> (empty cells are -1).</p>
 </header>
 <main>
 	<div id="side">
@@ -68,7 +69,23 @@
 			<label><span>Outer width</span><input type="number" id="ow" step="any" min="0.1" value="24"><span class="u lu">in</span></label>
 			<label><span>Outer height</span><input type="number" id="oh" step="any" min="0.1" value="48"><span class="u lu">in</span></label>
 			<label><span>LED density</span><input type="number" id="lpm" step="any" min="1" value="30"><span class="u">/m</span></label>
-			<label><span>Nominal ring spacing</span><input type="number" id="rs" step="any" min="0.01" value="1.5"><span class="u lu">in</span></label>
+			<label><span>Layout</span>
+				<select id="layout">
+					<option value="warp">warped matrix</option>
+					<option value="polar">concentric rings (polar)</option>
+				</select>
+			</label>
+			<label><span><span class="polar">Nominal ring spacing</span><span class="warp">Nominal strip spacing</span></span><input type="number" id="rs" step="any" min="0.01" value="1.5"><span class="u lu">in</span></label>
+			<label><span>Min. bend radius</span><input type="number" id="br" step="any" min="0" value="12"><span class="u lu">in</span></label>
+			<div class="warp">
+			<label><span>Strips run along</span><select id="run"><option value="long">long axis</option><option value="short">short axis</option></select></label>
+			<label><span>Warp</span><input type="range" id="wp" min="0" max="100" step="1" value="100" style="width:110px"><span class="u" id="wpv">100%</span></label>
+			<label><span>Limit warp to bend radius</span><input type="checkbox" id="wl" checked></label>
+			<div class="hint">Straight-ish strips side by side, bowed toward the fixture outline so that the strip ends trace the oval.
+				0% warp is a plain matrix clipped to the oval; 100% is an elliptical grid mapping in which the outermost strips follow the outline.
+				Every strip is an arc of an ellipse; with the limit on, the warp is lowered until no strip bends (in its own plane) tighter than the minimum bend radius.</div>
+			</div>
+			<div class="polar">
 			<label><span>Center line</span><input type="range" id="cl" min="0" max="100" step="1" value="0" style="width:110px"><span class="u" id="clv">0%</span></label>
 			<label><span>Ring shape</span>
 				<select id="shape">
@@ -85,14 +102,22 @@
 			</label>
 			<div class="hint">Center line 0% ends in a single center LED (scaled rings); 100% gives the longest line, where the ring gap is the same on both axes. A longer line evens out the gaps between rings.
 				"Even spacing" rings avoid the bunching that plain ellipses show between the axes.</div>
+			</div>
 			<div class="hint" id="ringHint"></div>
 		</fieldset>
 		<fieldset>
 			<legend>Wiring</legend>
+			<div class="warp">
+			<label><span>Start corner</span><select id="corner"><option value="tl">top left</option><option value="tr">top right</option><option value="bl">bottom left</option><option value="br">bottom right</option></select></label>
+			<label><span>Serpentine</span><input type="checkbox" id="serp" checked></label>
+			<div class="hint">The first strip is the outermost one on the start corner's side; it starts at its end nearest that corner. Serpentine reverses every other strip, otherwise all strips run the same way.</div>
+			</div>
+			<div class="polar">
 			<label><span>Start angle</span><input type="number" id="sa" step="any" value="0"><span class="u">°</span></label>
 			<label><span>Direction</span><select id="dir"><option value="cw">clockwise</option><option value="ccw">counter-clockwise</option></select></label>
 			<label><span>Ring order</span><select id="order"><option value="out">outer → center</option><option value="in">center → outer</option></select></label>
 			<div class="hint">0° = top (12 o'clock); angles increase clockwise. Every ring starts at the start angle, viewed from the front.</div>
+			</div>
 		</fieldset>
 		<fieldset>
 			<legend>Matrix</legend>
@@ -108,7 +133,7 @@
 			<label><span>Grid lines</span><input type="checkbox" id="vGrid" checked></label>
 			<label><span>Strip path</span><input type="checkbox" id="vPath" checked></label>
 			<label><span>Snap error lines</span><input type="checkbox" id="vErr"></label>
-			<label><span>Color LEDs by ring gap</span><input type="checkbox" id="vGap"></label>
+			<label><span>Color LEDs by ring / strip gap</span><input type="checkbox" id="vGap"></label>
 			<label><span>Mapped cells</span><input type="checkbox" id="vCell" checked></label>
 		</fieldset>
 	</div>
@@ -122,10 +147,10 @@
 				<button id="dl">Download ledmap.json</button>
 				<button id="cp">Copy</button>
 				<button id="dlcsv">Download LED positions (CSV)</button>
-				<button id="dlimg">Download ring test image (PNG)</button>
+				<button id="dlimg">Download ring / strip test image (PNG)</button>
 			</div>
 			<div class="hint">In WLED: set the LED count under LED Preferences to the total LED count, upload this as <code>/ledmap.json</code> via <code>/edit</code>, then reboot.
-				The ring test image has the exact matrix size and paints each ring in its own color (see per-ring details); show it with Pixel Forge / the Image effect to check that the map matches the fixture.</div>
+				The test image has the exact matrix size and paints each ring or strip in its own color (see the details table); show it with Pixel Forge / the Image effect to check that the map matches the fixture.</div>
 			<textarea id="out" readonly spellcheck="false"></textarea>
 		</fieldset>
 		<fieldset>
@@ -140,7 +165,7 @@
 				Trim each sheet along its dashed line on the right and bottom edges and lay it over the overlap of the neighboring sheets.</div>
 		</fieldset>
 		<details>
-			<summary>Per-ring details</summary>
+			<summary>Per-ring / per-strip details</summary>
 			<table id="rings"></table>
 		</details>
 	</div>
@@ -217,6 +242,116 @@ function distToPolyline(x, y, pts) {
 	return m;
 }
 
+// Smallest radius of curvature along a sampled curve (three-point circumradius); Infinity for a straight curve.
+function bendRadius(pts, closed) {
+	const n = pts.length;
+	let m = Infinity;
+	for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {
+		const a = pts[(i + n - 1) % n], b = pts[i], c = pts[(i + 1) % n];
+		const cr = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])); // twice the triangle area
+		if (cr > 1e-12) m = Math.min(m, Math.hypot(b[0] - a[0], b[1] - a[1]) * Math.hypot(c[0] - b[0], c[1] - b[1]) * Math.hypot(a[0] - c[0], a[1] - c[1]) / (2 * cr));
+	}
+	return m;
+}
+
+// Arc-length table of an open polyline: {len, at(s)}, s clamped to [0, len].
+function polyArc(pts) {
+	const cum = [0];
+	for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+	const len = cum[cum.length - 1];
+	function at(s) {
+		s = Math.max(0, Math.min(len, s));
+		let lo = 0, hi = pts.length - 1;
+		while (hi - lo > 1) { const m = (lo + hi) >> 1; if (cum[m] <= s) lo = m; else hi = m; }
+		const f = (s - cum[lo]) / ((cum[hi] - cum[lo]) || 1);
+		return [pts[lo][0] + (pts[hi][0] - pts[lo][0]) * f, pts[lo][1] + (pts[hi][1] - pts[lo][1]) * f];
+	}
+	return { len, at };
+}
+
+function statsOf(gaps) {
+	if (!gaps.length) return { min: 0, max: 0, mean: 0, cv: 0 };
+	const mean = gaps.reduce((s, v) => s + v, 0) / gaps.length;
+	const sd = Math.sqrt(gaps.reduce((s, v) => s + (v - mean) ** 2, 0) / gaps.length);
+	return { min: Math.min(...gaps), max: Math.max(...gaps), mean, cv: mean ? sd / mean : 0 };
+}
+
+const layout = (p) => p.layout === "warp" ? buildWarped(p) : buildLeds(p);
+
+// Warped matrix: n strips side by side across the "stack" axis, each running along the "run" axis and ending on the oval.
+// In coordinates normalized to the oval (u along the run, v across it; the unit circle is the fixture outline) strip v0 is
+//   v(u) = v0 * sqrt(1 - W u^2 / (2 - v0^2)),
+// an arc of an ellipse with semi-axes sqrt((2 - v0^2) / W) and v0. W = 0 gives straight strips (a plain matrix clipped to the oval);
+// W = 1 is the elliptical grid mapping x = u sqrt(1 - v^2/2), y = v sqrt(1 - u^2/2), where the strips bow toward the outline and
+// the outermost ones follow it. A strip ends where it meets the outline: u_end^2 = (1 - v0^2) / (1 - W v0^2 / (2 - v0^2)).
+// Strips are evenly spaced on the center axis (u = 0); the warp only bends them, it never makes them cross.
+const ROW_SAMPLES = 400;
+function warpRows(p) {
+	const vertical = (p.run === "long") === (p.h >= p.w); // strips run up and down
+	const R = (vertical ? p.h : p.w) / 2, S = (vertical ? p.w : p.h) / 2;
+	const n = Math.max(1, Math.round(2 * S / p.spacing - 1e-9));
+	const vs = Array.from({ length: n }, (_, k) => -1 + (2 * k + 1) / n);
+	const curve = (v0, W) => {
+		const q = 2 - v0 * v0, ue = Math.sqrt((1 - v0 * v0) / (1 - W * v0 * v0 / q));
+		const pts = [];
+		for (let i = 0; i <= ROW_SAMPLES; i++) {
+			const u = ue * (2 * i / ROW_SAMPLES - 1);
+			const run = u * R, st = v0 * Math.sqrt(Math.max(0, 1 - W * u * u / q)) * S;
+			pts.push(vertical ? [st, run] : [run, st]);
+		}
+		return pts;
+	};
+	const tightest = (W) => Math.min(...vs.map((v0) => bendRadius(curve(v0, W), false)));
+	return { vertical, S, n, vs, curve, tightest };
+}
+
+function buildWarped(p) {
+	const g = warpRows(p);
+	let W = p.warp, limited = false;
+	if (p.limit && W > 0 && g.tightest(W) < p.bend) {
+		// bends only get tighter with more warp: search the largest warp that keeps every strip within the bend radius
+		let lo = 0, hi = W;
+		for (let i = 0; i < 25; i++) { const mid = (lo + hi) / 2; if (g.tightest(mid) >= p.bend) lo = mid; else hi = mid; }
+		W = lo; limited = true;
+	}
+	// rows in geometric order (negative stack side first); every strip has an LED at its middle, so the LEDs line up in columns
+	const rows = g.vs.map((v0) => {
+		const curve = g.curve(v0, W);
+		const arc = polyArc(curve);
+		const m = Math.floor(arc.len / 2 / p.pitch + 1e-9);
+		const pts = [];
+		for (let j = -m; j <= m; j++) pts.push(arc.at(arc.len / 2 + j * p.pitch));
+		const s0 = arc.len / 2 - (m + 0.5) * p.pitch, s1 = arc.len / 2 + (m + 0.5) * p.pitch;
+		const strip = Array.from({ length: 81 }, (_, i) => arc.at(s0 + (s1 - s0) * i / 80)); // strip body, half a pitch past the end LEDs
+		const xs = curve.map((q) => q[0]), ys = curve.map((q) => q[1]);
+		return { curve, strip, pts, open: true, len: arc.len, cnt: pts.length, ds: p.pitch, gap: arc.len - 2 * m * p.pitch,
+			ew: Math.max(...xs) - Math.min(...xs), eh: Math.max(...ys) - Math.min(...ys), bend: bendRadius(curve, false) };
+	});
+	// gap: distance from each LED to the nearest neighboring strip
+	const gaps = [];
+	rows.forEach((r, i) => {
+		const nb = [rows[i - 1], rows[i + 1]].filter(Boolean);
+		r.gaps = r.pts.map(([x, y]) => {
+			if (!nb.length) return null;
+			const v = Math.min(...nb.map((o) => distToPolyline(x, y, o.curve)));
+			gaps.push(v);
+			return v;
+		});
+	});
+	// wiring: start corner picks the first strip (stack axis) and its first end (run axis); y grows downwards
+	const firstNeg = g.vertical ? p.corner[1] === "l" : p.corner[0] === "t";
+	const runNeg = g.vertical ? p.corner[0] === "t" : p.corner[1] === "l";
+	const order = firstNeg ? rows : rows.slice().reverse();
+	const leds = [];
+	order.forEach((r, k) => {
+		r.k = k;
+		if (runNeg === (p.serp && k % 2 === 1)) { r.pts.reverse(); r.gaps.reverse(); r.strip.reverse(); }
+		r.pts.forEach(([x, y], i) => leds.push({ x, y, ring: k, ri: k, gap: r.gaps[i] }));
+	});
+	return { leds, rings: order, n: g.n, step: 2 * g.S / g.n, c: 0, gapStats: statsOf(gaps), outerW: p.w, outerH: p.h,
+		warp: W, limited, bend: Math.min(...order.map((r) => r.bend)) };
+}
+
 // Build the physical LED layout (in inches, origin at the oval center) in wiring order.
 function buildLeds(p) {
 	const theta = p.start * Math.PI / 180;
@@ -257,7 +392,9 @@ function buildLeds(p) {
 		const curve = [];
 		for (let i = 0; i <= 360; i++) curve.push(arc.at(arc.len * i / 360));
 		const ext = curve.reduce((e, [x, y]) => [Math.max(e[0], Math.abs(x)), Math.max(e[1], Math.abs(y))], [0, 0]);
-		rings.push({ k, w, ew: 2 * ext[0], eh: 2 * ext[1], len: arc.len, cnt, ds, gap: arc.len - (cnt - 1) * ds, pts, curve });
+		const dense = [];
+		for (let i = 0; i < 720; i++) dense.push(arc.at(arc.len * i / 720));
+		rings.push({ k, w, ew: 2 * ext[0], eh: 2 * ext[1], len: arc.len, cnt, ds, gap: arc.len - (cnt - 1) * ds, pts, curve, bend: bendRadius(dense, true) });
 	}
 	// center: a single LED, or LEDs at strip pitch along the center line
 	const vertical = b0 >= a0;
@@ -275,18 +412,16 @@ function buildLeds(p) {
 		}
 		ctrCurve = vertical ? [[0, -c], [0, c]] : [[-c, 0], [c, 0]];
 	}
-	rings.push({ k: n, w: 1, ew: vertical ? 0 : 2 * c, eh: vertical ? 2 * c : 0, len: ctr.length > 1 ? 2 * c : 0, cnt: ctr.length, ds: p.pitch, gap: 0, pts: ctr, curve: ctrCurve, center: true });
+	rings.push({ k: n, w: 1, ew: vertical ? 0 : 2 * c, eh: vertical ? 2 * c : 0, len: ctr.length > 1 ? 2 * c : 0, cnt: ctr.length, ds: p.pitch, gap: 0, pts: ctr, curve: ctrCurve, center: true, bend: Infinity });
 	// ring gap: distance from each LED to the next ring inwards (center line / LED for the innermost ring)
 	const gaps = [];
 	for (let k = 0; k < n; k++) rings[k].gaps = rings[k].pts.map(([x, y]) => { const g = distToPolyline(x, y, rings[k + 1].curve); gaps.push(g); return g; });
 	rings[n].gaps = rings[n].pts.map(() => null);
-	const mean = gaps.reduce((s, v) => s + v, 0) / gaps.length;
-	const sd = Math.sqrt(gaps.reduce((s, v) => s + (v - mean) ** 2, 0) / gaps.length);
-	const gapStats = { min: Math.min(...gaps), max: Math.max(...gaps), mean, cv: sd / mean };
+	const gapStats = statsOf(gaps);
 	if (p.order === "in") rings.reverse();
 	const leds = [];
 	rings.forEach((r, ri) => r.pts.forEach(([x, y], i) => leds.push({ x, y, ring: r.k, ri, gap: r.gaps[i] })));
-	return { leds, rings, n, step, c, gapStats, outerW: 2 * a0, outerH: 2 * b0 };
+	return { leds, rings, n, step, c, gapStats, outerW: 2 * a0, outerH: 2 * b0, bend: Math.min(...rings.map((r) => r.bend)) };
 }
 
 // Snap LEDs to matrix cells. Each LED gets its nearest cell; on conflicts the LED closest to the
@@ -336,7 +471,11 @@ function snap(leds, p) {
 
 function params() {
 	return {
+		layout: gId("layout").value,
 		w: toIn(num("ow")), h: toIn(num("oh")),
+		bend: Math.max(0, toIn(num("br")) || 0),
+		run: gId("run").value, warp: num("wp") / 100, limit: gId("wl").checked,
+		corner: gId("corner").value, serp: gId("serp").checked,
 		pitch: 1000 / num("lpm") / MM,
 		spacing: toIn(num("rs")),
 		shape: gId("shape").value, spread: gId("spread").value, line: num("cl") / 100,
@@ -351,8 +490,9 @@ function valid(p) {
 
 function compute() {
 	const p = params();
+	d.body.className = "L-" + p.layout;
 	if (!valid(p)) { gId("msgs").innerHTML = '<div class="err">Enter positive numbers for all dimensions.</div>'; return; }
-	const lay = buildLeds(p);
+	const lay = layout(p);
 	const g = snap(lay.leds, p);
 	res = { p, ...lay, g };
 	render();
@@ -365,17 +505,28 @@ function stat(label, val, sub = "", cls = "") {
 
 function render() {
 	const { p, leds, rings, n, step, c, gapStats, g, outerW, outerH } = res;
-	const ctr = rings.find((r) => r.center);
+	const warp = p.layout === "warp";
 	gId("clv").textContent = `${Math.round(p.line * 100)}%`;
-	const outerTxt = p.spread === "fit" ? `Outer ring resized to ${fromIn(outerW).toFixed(2)} × ${fromIn(outerH).toFixed(2)} ${unit}. ` : "";
-	gId("ringHint").textContent = outerTxt + `${n} rings + ` + (ctr.cnt > 1
-		? `a ${fromIn(2 * c).toFixed(2)} ${unit} center line (${ctr.cnt} LEDs). `
-		: "center LED. ") + `Ring spacing ${p.spread === "fit" ? "≈" : ""}${fromIn(step).toFixed(2)} ${unit} across the narrow axis.`;
+	gId("wpv").textContent = `${Math.round(p.warp * 100)}%`;
+	if (warp) {
+		gId("ringHint").textContent = `${n} strips, ${fromIn(step).toFixed(2)} ${unit} apart on the center axis. Warp ${Math.round(res.warp * 100)}%`
+			+ (res.limited ? ` (lowered from ${Math.round(p.warp * 100)}% to keep the ${fromIn(p.bend).toFixed(2)} ${unit} bend radius).` : ".");
+	} else {
+		const ctr = rings.find((r) => r.center);
+		const outerTxt = p.spread === "fit" ? `Outer ring resized to ${fromIn(outerW).toFixed(2)} × ${fromIn(outerH).toFixed(2)} ${unit}. ` : "";
+		gId("ringHint").textContent = outerTxt + `${n} rings + ` + (ctr.cnt > 1
+			? `a ${fromIn(2 * c).toFixed(2)} ${unit} center line (${ctr.cnt} LEDs). `
+			: "center LED. ") + `Ring spacing ${p.spread === "fit" ? "≈" : ""}${fromIn(step).toFixed(2)} ${unit} across the narrow axis.`;
+	}
 	const stripLen = rings.reduce((s, r) => s + r.cnt, 0) * p.pitch;
-	let html = stat("Total LEDs", leds.length, `${rings.length} rings · ~${(stripLen * MM / 1000).toFixed(2)} m strip`);
-	html += stat("Ring gap", `${fromIn(gapStats.min).toFixed(2)} – ${fromIn(gapStats.max).toFixed(2)} ${unit}`,
+	let html = stat("Total LEDs", leds.length, `${rings.length} ${warp ? "strips" : "rings"} · ~${(stripLen * MM / 1000).toFixed(2)} m strip`);
+	html += stat(warp ? "Strip gap" : "Ring gap", `${fromIn(gapStats.min).toFixed(2)} – ${fromIn(gapStats.max).toFixed(2)} ${unit}`,
 		`spread ${(100 * gapStats.cv).toFixed(0)}% (std/mean) · mean ${fromIn(gapStats.mean).toFixed(2)}`);
+	const tooTight = rings.filter((r) => r.bend < p.bend * (1 - 1e-6));
+	html += stat("Tightest bend", isFinite(res.bend) ? fmtLen(res.bend) : "straight", `radius · min. ${fromIn(p.bend).toFixed(2)} ${unit}`, tooTight.length ? "err" : "ok");
 	const msgs = [];
+	if (tooTight.length) msgs.push(`<div class="err">${tooTight.length} ${warp ? "strips bend" : "rings bend"} tighter than the ${fromIn(p.bend).toFixed(2)} ${unit} minimum bend radius (see the details table).`
+		+ (warp ? " Turn on \"Limit warp to bend radius\" or lower the warp." : " Try the warped matrix layout.") + "</div>");
 	if (!g.ok) {
 		html += stat("Matrix", `${g.cols} × ${g.rows}`, "too large or too small", "err");
 		msgs.push(`<div class="err">Matrix must be at most ${MAX_DIM}×${MAX_DIM} and have room for every LED. Change the cell size.</div>`);
@@ -404,18 +555,21 @@ function render() {
 	for (let y = 0; y < g.rows; y++) lines.push(map.slice(y * g.cols, (y + 1) * g.cols).map((v) => String(v).padStart(w)).join(","));
 	gId("out").value = `{"n":${JSON.stringify(p.name)},"width":${g.cols},"height":${g.rows},"map":[\n${lines.join(",\n")}\n]}\n`;
 
-	let t = `<tr><th>#</th><th>test color</th><th>ring</th><th>w × h (${unit})</th><th>perimeter</th><th>LEDs</th><th>first idx</th><th>end gap</th></tr>`;
+	let t = `<tr><th>#</th><th>test color</th><th>${warp ? "strip" : "ring"}</th><th>w × h (${unit})</th><th>${warp ? "length" : "perimeter"}</th><th>LEDs</th><th>first idx</th><th>${warp ? "spare" : "end gap"}</th><th>tightest bend</th></tr>`;
 	let idx = 0;
 	rings.forEach((r, i) => {
-		t += `<tr><td>${i}</td><td><span style="display:inline-block;width:14px;height:10px;background:${ringColor(r)}"></span></td><td>${r.center ? "center" : r.k}</td><td>${fromIn(r.ew).toFixed(2)} × ${fromIn(r.eh).toFixed(2)}</td>`
-			+ `<td>${fromIn(r.len).toFixed(2)}</td><td>${r.cnt}</td><td>${idx}</td><td>${r.center ? "" : fromIn(r.gap).toFixed(2)}</td></tr>`;
+		const tight = r.bend < p.bend * (1 - 1e-6) ? ' class="err"' : "";
+		t += `<tr><td>${i}</td><td><span style="display:inline-block;width:14px;height:10px;background:${ringColor(r)}"></span></td><td>${r.center ? "center" : r.open ? r.k + 1 : r.k}</td><td>${fromIn(r.ew).toFixed(2)} × ${fromIn(r.eh).toFixed(2)}</td>`
+			+ `<td>${fromIn(r.len).toFixed(2)}</td><td>${r.cnt}</td><td>${idx}</td><td>${r.center ? "" : fromIn(r.gap).toFixed(2)}</td>`
+			+ `<td${tight}>${isFinite(r.bend) ? fromIn(r.bend).toFixed(2) : "straight"}</td></tr>`;
 		idx += r.cnt;
 	});
 	gId("rings").innerHTML = t;
 }
 
-// Ring test color: by ring number counted from the outside, so colors do not depend on the wiring order.
+// Ring test color: by ring number counted from the outside, so colors do not depend on the wiring order (strips: in wiring order).
 const ringColor = (r) => r.center ? CENTER_COLOR : RING_COLORS[r.k % RING_COLORS.length];
+const ringLabel = (r) => r.center ? "center" : r.open ? `strip ${r.k + 1}` : `ring ${r.k}`;
 
 // Matrix-sized PNG: every cell takes the color of the ring of the nearest mapped LED (empty cells included),
 // so a ring that is off by a cell still shows its own color and a mismatching LED count shows up as a color change.
@@ -512,7 +666,7 @@ cv.addEventListener("pointermove", (e) => {
 	res.leds.forEach((l, i) => { const dd = Math.hypot(l.x - mx, l.y - my); if (dd < bd) { bd = dd; bi = i; } });
 	if (bi < 0 || bd * view.s > 12) { tip.style.display = "none"; return; }
 	const l = res.leds[bi];
-	tip.innerHTML = `LED ${bi} · ring ${res.rings[l.ri].center ? "center" : l.ring}<br>`
+	tip.innerHTML = `LED ${bi} · ${ringLabel(res.rings[l.ri])}<br>`
 		+ `pos ${fromIn(l.x).toFixed(2)}, ${fromIn(l.y).toFixed(2)} ${unit}`
 		+ (l.gap != null ? ` · gap ${fromIn(l.gap).toFixed(2)} ${unit}` : "")
 		+ (res.g.ok ? `<br>cell x=${l.cx}, y=${l.cy} · err ${fromIn(l.err).toFixed(2)} ${unit}` : "");
@@ -542,7 +696,7 @@ gId("dlcsv").onclick = () => {
 	if (!res) return;
 	let csv = "index,ring,x_in,y_in,cell_x,cell_y,error_in,ring_gap_in\n";
 	res.leds.forEach((l, i) => {
-		csv += `${i},${res.rings[l.ri].center ? "center" : l.ring},${l.x.toFixed(3)},${l.y.toFixed(3)},${l.cx ?? ""},${l.cy ?? ""},${l.err != null ? l.err.toFixed(3) : ""},${l.gap != null ? l.gap.toFixed(3) : ""}\n`;
+		csv += `${i},${res.rings[l.ri].center ? "center" : res.rings[l.ri].open ? `S${l.ring + 1}` : l.ring},${l.x.toFixed(3)},${l.y.toFixed(3)},${l.cx ?? ""},${l.cy ?? ""},${l.err != null ? l.err.toFixed(3) : ""},${l.gap != null ? l.gap.toFixed(3) : ""}\n`;
 	});
 	download("led_positions.csv", csv, "text/csv");
 };
@@ -645,6 +799,7 @@ function ledFrames(r) {
 		let tx, ty;
 		if (n < 2) { tx = 1; ty = 0; }
 		else if (r.center) { const a = r.pts[0], b = r.pts[n - 1]; tx = b[0] - a[0]; ty = b[1] - a[1]; }
+		else if (r.open) { const a = r.pts[Math.max(0, i - 1)], b = r.pts[Math.min(n - 1, i + 1)]; tx = b[0] - a[0]; ty = b[1] - a[1]; }
 		else { const a = r.pts[(i + n - 1) % n], b = r.pts[(i + 1) % n]; tx = b[0] - a[0]; ty = b[1] - a[1]; }
 		const l = Math.hypot(tx, ty) || 1;
 		tx /= l; ty /= l;
@@ -680,8 +835,10 @@ function layoutPdf() {
 	const frames = rings.map(ledFrames);
 	const firstIdx = [];
 	rings.reduce((i, r, ri) => { firstIdx[ri] = i; return i + r.cnt; }, 0);
-	const ringName = (r) => r.center ? "center" : `R${r.k + 1}`;
+	const warp = p.layout === "warp";
+	const ringName = (r) => r.center ? "center" : r.open ? `S${r.k + 1}` : `R${r.k + 1}`;
 	const title = `${p.name}: ${fromIn(p.w).toFixed(unit === "mm" ? 0 : 2)} x ${fromIn(p.h).toFixed(unit === "mm" ? 0 : 2)} ${unit} oval, ${leds.length} LEDs`;
+	const corners = { tl: "top left", tr: "top right", bl: "bottom left", br: "bottom right" };
 	const streams = [];
 
 	// scale check bars in the bottom margin
@@ -721,8 +878,9 @@ function layoutPdf() {
 			`Sheets are numbered left to right, top to bottom. Trim along the dashed line on the right and bottom edge of each sheet,`,
 			`then lay it over the next sheet so the trimmed edge sits on that sheet's dotted line and the grid lines match.`,
 			`Grid: ${unit === "mm" ? "20 mm" : "1 in"}, centered on the fixture. Big dot = LED 0. Strip ${fmt(sw * MM)} mm wide, LED squares ${fmt(ls * MM)} mm.`,
-			`Rings (outer to center): ` + rings.slice().sort((u, v) => u.k - v.k).map((r) => `${ringName(r)} ${r.cnt}`).join(", "),
-			`Outer ring ${fromIn(outerW).toFixed(2)} x ${fromIn(outerH).toFixed(2)} ${unit}, ${p.dir === "cw" ? "clockwise" : "counter-clockwise"} from ${fmt(p.start)} deg, ${p.order === "out" ? "outer ring first" : "center first"}.`
+			(warp ? "Strips (wiring order): " : "Rings (outer to center): ") + rings.slice().sort((u, v) => u.k - v.k).map((r) => `${ringName(r)} ${r.cnt}`).join(", "),
+			warp ? `Warped matrix, warp ${Math.round(res.warp * 100)}%, tightest bend radius ${fromIn(res.bend).toFixed(2)} ${unit}, ${p.serp ? "serpentine" : "all strips the same way"} from the ${corners[p.corner]} corner.`
+				: `Outer ring ${fromIn(outerW).toFixed(2)} x ${fromIn(outerH).toFixed(2)} ${unit}, ${p.dir === "cw" ? "clockwise" : "counter-clockwise"} from ${fmt(p.start)} deg, ${p.order === "out" ? "outer ring first" : "center first"}.`
 		];
 		lines.forEach((t) => { c.text(PAGE_MARGIN, y, 8, t); y += 0.2; });
 		scaleBars(c, G.ph);
@@ -768,7 +926,11 @@ function layoutPdf() {
 			polyRuns(r.curve, box).forEach((run) => c.poly(run));
 			if (sw > 0) {
 				c.pen(0, 0.01);
-				if (r.center) {
+				if (r.open) {
+					const o = offsetPoly(r.strip, sw / 2).concat(offsetPoly(r.strip, -sw / 2).reverse());
+					o.push(o[0]);
+					polyRuns(o, box).forEach((run) => c.poly(run));
+				} else if (r.center) {
 					const [a, b] = [r.curve[0], r.curve[r.curve.length - 1]], e = p.pitch / 2;
 					const ux = (b[0] - a[0]) / (Math.hypot(b[0] - a[0], b[1] - a[1]) || 1), uy = (b[1] - a[1]) / (Math.hypot(b[0] - a[0], b[1] - a[1]) || 1);
 					const A = [a[0] - ux * e, a[1] - uy * e], B = [b[0] + ux * e, b[1] + uy * e];
@@ -827,7 +989,7 @@ gId("dlpdf").onclick = () => {
 gId("autofit").onclick = () => {
 	const p = params();
 	if (!valid(p)) return;
-	const { leds } = buildLeds(p);
+	const { leds } = layout(p);
 	let c = p.pitch, found = 0;
 	while (true) {
 		const g = snap(leds.map((l) => ({ x: l.x, y: l.y })), { ...p, cell: c });
@@ -842,7 +1004,7 @@ gId("autofit").onclick = () => {
 gId("unit").onchange = () => {
 	const nu = gId("unit").value;
 	if (nu === unit) return;
-	["ow", "oh", "rs", "cs"].forEach((id) => {
+	["ow", "oh", "rs", "br", "cs"].forEach((id) => {
 		const v = num(id);
 		if (isFinite(v)) gId(id).value = +(nu === "mm" ? v * MM : v / MM).toFixed(nu === "mm" ? 1 : 3);
 	});
