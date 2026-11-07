@@ -585,25 +585,28 @@ function ringRGB(r) {
 const ringColor = (r) => `rgb(${ringRGB(r).join(",")})`;
 const ringLabel = (r) => r.center ? "center" : r.open ? `strip ${r.k + 1}` : `ring ${r.k}`;
 
-// Test image, exactly matrix-sized (one pixel per cell): every mapped cell takes the color of its LED's ring / strip; empty cells
-// next to a mapped cell (8-neighborhood) take the color of the nearest LED, so an image that lands one cell off still shows the
-// right color; every other cell is black. Returns palette indices (0 = black) and the palette.
+// Test image, one entry per matrix cell: every mapped cell takes the color of its LED's ring / strip. An empty cell inside the
+// layout (mapped cells on both sides of it in its row, or above and below it in its column) takes the color of the nearest LED;
+// every other empty cell is black, so the black border matches the -1 border of ledmap.json exactly.
+// Returns palette indices (0 = black) and the palette.
 function ringTestImage() {
 	const { leds, rings, g } = res;
 	const pal = [[0, 0, 0]], palIdx = rings.map((r) => { pal.push(ringRGB(r)); return pal.length - 1; });
 	const px = new Uint8Array(g.cols * g.rows);
+	const rowMin = new Array(g.rows).fill(Infinity), rowMax = new Array(g.rows).fill(-1);
+	const colMin = new Array(g.cols).fill(Infinity), colMax = new Array(g.cols).fill(-1);
+	for (const l of leds) {
+		rowMin[l.cy] = Math.min(rowMin[l.cy], l.cx); rowMax[l.cy] = Math.max(rowMax[l.cy], l.cx);
+		colMin[l.cx] = Math.min(colMin[l.cx], l.cy); colMax[l.cx] = Math.max(colMax[l.cx], l.cy);
+	}
 	for (let cy = 0; cy < g.rows; cy++) for (let cx = 0; cx < g.cols; cx++) {
 		const i = cy * g.cols + cx;
 		if (g.occ[i] >= 0) { px[i] = palIdx[leds[g.occ[i]].ri]; continue; }
+		const inside = (cx > rowMin[cy] && cx < rowMax[cy]) || (cy > colMin[cx] && cy < colMax[cx]);
+		if (!inside) continue;
 		let bd = Infinity, bl = null;
-		for (let yy = Math.max(0, cy - 1); yy <= Math.min(g.rows - 1, cy + 1); yy++)
-			for (let xx = Math.max(0, cx - 1); xx <= Math.min(g.cols - 1, cx + 1); xx++) {
-				const li = g.occ[yy * g.cols + xx];
-				if (li < 0) continue;
-				const l = leds[li], dd = (g.x0 + (cx + .5) * g.c - l.x) ** 2 + (g.y0 + (cy + .5) * g.c - l.y) ** 2;
-				if (dd < bd) { bd = dd; bl = l; }
-			}
-		if (bl) px[i] = palIdx[bl.ri];
+		for (const l of leds) { const dd = (l.cx - cx) ** 2 + (l.cy - cy) ** 2; if (dd < bd) { bd = dd; bl = l; } }
+		px[i] = palIdx[bl.ri];
 	}
 	return { w: g.cols, h: g.rows, px, pal };
 }
