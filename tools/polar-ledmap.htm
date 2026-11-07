@@ -148,12 +148,10 @@
 				<button id="cp">Copy</button>
 				<button id="dlcsv">Download LED positions (CSV)</button>
 				<button id="dlimg">Download ring / strip test image (PNG)</button>
-				<button id="dlgif">Download test image (GIF, for the Image effect)</button>
 			</div>
 			<div class="hint">In WLED: set the LED count under LED Preferences to the total LED count, upload this as <code>/ledmap.json</code> via <code>/edit</code>, then reboot.
 				The test image has the exact matrix size and paints every ring or strip in its own color (see the details table), with black away from the LEDs; a color change along a strip or ring means the map does not match the fixture.
-				Easiest check: upload the GIF via <code>/edit</code>, set the segment name to its file name (e.g. <code>test-48x96.gif</code>) and pick the Image effect; the GIF matches the matrix size, so it is drawn 1:1 without scaling.
-				In Pixel Forge, the default crop is square and does not cover a non-square image: use "match size", then move the crop onto the image before uploading.</div>
+				The matrix only spans the mapped cells (no empty border rows or columns). In Pixel Forge, use "match size" and place the crop exactly on the image before uploading.</div>
 			<textarea id="out" readonly spellcheck="false"></textarea>
 		</fieldset>
 		<fieldset>
@@ -468,7 +466,13 @@ function snap(leds, p) {
 		out.maxErr = Math.max(out.maxErr, l.err);
 		out.sumErr += l.err;
 	}
-	out.occ = occ;
+	// crop the matrix to the bounding box of the mapped cells, so it has no empty border rows or columns
+	let mx0 = cols, my0 = rows, mx1 = -1, my1 = -1;
+	for (const l of leds) { mx0 = Math.min(mx0, l.cx); mx1 = Math.max(mx1, l.cx); my0 = Math.min(my0, l.cy); my1 = Math.max(my1, l.cy); }
+	out.cols = mx1 - mx0 + 1; out.rows = my1 - my0 + 1;
+	out.x0 = x0 + mx0 * c; out.y0 = y0 + my0 * c;
+	out.occ = new Int32Array(out.cols * out.rows).fill(-1);
+	leds.forEach((l, i) => { l.cx -= mx0; l.cy -= my0; out.occ[l.cy * out.cols + l.cx] = i; });
 	return out;
 }
 
@@ -612,41 +616,6 @@ function testImagePng(img) {
 	return c;
 }
 
-// Minimal single-frame GIF89a writer (global palette, LZW), so the file can go straight to the Image effect.
-function testImageGif(img) {
-	const out = [];
-	const u16 = (v) => out.push(v & 255, v >> 8);
-	let bits = 1;
-	while ((1 << bits) < img.pal.length && bits < 8) bits++;
-	for (const ch of "GIF89a") out.push(ch.charCodeAt(0));
-	u16(img.w); u16(img.h); out.push(0x80 | (bits - 1), 0, 0);
-	for (let i = 0; i < 1 << bits; i++) out.push(...(img.pal[i] || [0, 0, 0]));
-	out.push(0x2c); u16(0); u16(0); u16(img.w); u16(img.h); out.push(0);
-	const minCode = Math.max(2, bits), clear = 1 << minCode, eoi = clear + 1;
-	out.push(minCode);
-	const bytes = [];
-	let size = minCode + 1, next = eoi + 1, dict = new Map(), acc = 0, nacc = 0;
-	const emit = (code) => { acc |= code << nacc; nacc += size; while (nacc >= 8) { bytes.push(acc & 255); acc >>= 8; nacc -= 8; } };
-	const px = img.px.map((v) => Math.min(v, (1 << bits) - 1)); // more than 255 rings / strips: the last colors repeat
-	emit(clear);
-	let cur = px[0];
-	for (let i = 1; i < px.length; i++) {
-		const k = px[i], key = cur * 256 + k;
-		if (dict.has(key)) { cur = dict.get(key); continue; }
-		emit(cur);
-		if (next < 4096) {
-			if (next >= 1 << size) size++;
-			dict.set(key, next++);
-		} else { emit(clear); dict = new Map(); size = minCode + 1; next = eoi + 1; }
-		cur = k;
-	}
-	emit(cur); emit(eoi);
-	if (nacc > 0) bytes.push(acc & 255);
-	for (let i = 0; i < bytes.length; i += 255) { const b = bytes.slice(i, i + 255); out.push(b.length, ...b); }
-	out.push(0, 0x3b);
-	return new Uint8Array(out);
-}
-
 // ---- preview ----
 const cv = gId("cv"), ctx = cv.getContext("2d");
 let view = null; // transform from inches to canvas px
@@ -764,10 +733,6 @@ gId("dlcsv").onclick = () => {
 gId("dlimg").onclick = () => {
 	if (!res || !res.g.ok) return;
 	testImagePng(ringTestImage()).toBlob((b) => download(`test-${res.g.cols}x${res.g.rows}.png`, b, "image/png"), "image/png");
-};
-gId("dlgif").onclick = () => {
-	if (!res || !res.g.ok) return;
-	download(`test-${res.g.cols}x${res.g.rows}.gif`, testImageGif(ringTestImage()), "image/gif");
 };
 
 // ---- layout template PDF ----
